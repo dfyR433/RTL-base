@@ -1,88 +1,75 @@
-# RTL-Monitor
+# RTL-Transceiver
 
-This project turns an **Ameba**-based board (e.g., BW20-12F, RTL8711) into a dual‑band Wi-Fi monitor. It captures 802.11 frames in promiscuous mode, adds radiotap headers, and streams them as a **pcapng** file over a high‑speed UART. The output can be read directly by Wireshark.
+**RTL-Transceiver** turns your AmebaDplus (RTL8721Dx) board into a professional dual‑band Wi‑Fi monitor and packet injector.
+
+---
 
 ## Features
 
-- **Dual‑band channel hopping** – scans both 2.4 GHz (channels 1–13) and 5 GHz (channels 36–165).
-- **pcapng output** – emits a valid Section Header Block (SHB) and Interface Description Block (IDB) with linktype `127` (radiotap), followed by Enhanced Packet Blocks (EPB) containing radiotap + 802.11 frames.
-- **Radiotap headers** – include channel, frequency, RSSI, and data rate.
-- **High‑resolution timestamps** – nanosecond resolution using the Cortex‑M DWT cycle counter (optional).
-- **ISR‑safe packet handling** – lock‑free ring buffer and packet pool for zero‑copy from the promiscuous callback.
-- **Configurable** – channel list, dwell time, UART baud rate, pinout, buffer sizes, etc. (see `monitor.h`).
+### Monitor Mode (pcapng over UART)
+- Full‑band channel hopping (2.4 GHz & 5 GHz) – cycles through 1‑13 and 36‑165.
+- Captures **all** 802.11 frames (data, management, control) via promiscuous mode.
+- Emits a **valid pcapng stream** containing:
+  - Section Header Block (SHB)
+  - Interface Description Block (IDB) with linktype 127 (radiotap)
+  - Enhanced Packet Blocks (EPB) with **radiotap headers** (channel, RSSI, data rate) + raw frame
+- High‑resolution timestamps using the **DWT cycle counter** (nanoseconds).
+- Lock‑free ring buffer and packet pool – safe for interrupt context, zero packets lost under moderate load.
+- Configurable UART baud rate (default 2 Mbaud) for real‑time streaming.
+
+### Packet Injector (Raw Frame Scheduler)
+- Create up to 16 **named injectors** with independent parameters:
+  - Channel (auto‑switched unless fixed)
+  - Transmission interval (nanoseconds)
+  - Max packets / retry limit
+  - Data rate (1 Mbps … MCS7, matching Ameba rate definitions)
+  - TX power (dBm, if supported)
+  - Flags: short GI, aggregation, fixed channel, etc.
+- Scheduler runs as an RTOS task or can be driven by a hardware timer.
+- Full control API: start, stop, activate/deactivate, modify parameters **on the fly**.
+- Weak platform hooks for time/timer – easy to adapt to any hardware.
+
+---
 
 ## Hardware Requirements
 
-- An Ameba‑based board with Wi‑Fi (e.g., BW20-12F, AmebaPro2, RTL8735, RTL8721).
-- A USB‑to‑UART adapter (3.3 V logic) connected to the board’s UART pins.
-- A computer to receive and analyse the pcapng stream (e.g., using Wireshark).
+- An **AmebaDplus** board (e.g. bw20, RTL8721Dx, RTL8711, etc.)
+- A USB‑to‑UART adapter (3.3V logic) connected to:
+  - TX → `_PB_5` (board's TX pin)
+  - RX → `_PB_4` (board's RX pin)
+- Optional: A second UART for debug messages (if you modify the code).
 
-## Pin Configuration
+---
 
-By default the UART uses:
+## Prerequisites
+- [Ameba RTOS SDK](https://github.com/Ameba-AIoT/ameba-rtos)
 
-| Signal | Pin   |
-|--------|-------|
-| TX     | `_PB_5` |
-| RX     | `_PB_4` |
+---
 
-These can be changed in `monitor.h` by redefining `TX_PIN` and `RX_PIN`.
+## Configuration
 
-## Building and Flashing
+| Kconfig option | Default | Description |
+|----------------|---------|-------------|
+| `CONFIG_RTLMON_UART_BAUD` | 2000000 | UART baud rate for pcapng stream |
+| `CONFIG_RTLMON_UART_PORT` | 2 | UART port number (0/1/2) – default 2 is LOGUART |
+| `CONFIG_RTLMON_RINGBUF_SIZE` | 16384 | Size of the ring buffer for captured frames |
+| `CONFIG_RTLMON_MAX_INJECTORS` | 8 | Maximum number of concurrent injectors |
+| `CONFIG_RTLMON_CHANNEL_HOP_LIST` | "1,6,11,36,40,44,48" | Comma‑separated channel list |
+| `CONFIG_RTLMON_CHANNEL_HOP_INTERVAL` | 1000 | Channel hop interval in ms |
 
-1. **Set up the Ameba SDK** – you need the official SDK (e.g., `ameba-rtos`) with FreeRTOS and the Wi-Fi driver.
-2. **Configure** – edit `monitor.h` to suit your needs (baud rate, channel list, timestamps, etc.).
-3. **Build** – use the usual Ameba build process (e.g., `./build.py`).
-4. **Flash** – upload the generated firmware to your board.
-
-## Usage
-
-1. Connect the UART adapter to your PC. Note the serial port name (e.g., `/dev/ttyUSB0` on Linux, `COM3` on Windows).
-2. Start a serial capture tool that can save raw binary data, for example:
-   ```bash
-   cat /dev/ttyUSB0 > capture.pcapng
-   ```
-   or using `screen` with logging:
-   ```bash
-   screen -L -Logfile capture.pcapng /dev/ttyUSB0 2000000
-   ```
-   (adjust baud rate to match `BAUD_RATE`).
-3. Power on or reset the Ameba board. After a short delay (3 seconds in `app_example.c`), the monitor starts and immediately sends the pcapng headers.
-4. Stop the capture after some time, then open `capture.pcapng` in Wireshark. Wireshark will automatically interpret the radiotap headers and 802.11 frames.
-
-## Configuration Options (`monitor.h`)
-
-| Macro                | Description                                                                 | Default                                     |
-|----------------------|-----------------------------------------------------------------------------|---------------------------------------------|
-| `WLAN_IDX`           | Wi‑Fi interface index (0 = STA)                                             | `STA_WLAN_INDEX` (0)                        |
-| `CHANNEL_LIST`       | Array of channels to hop                                                    | 2.4 GHz 1–13, 5 GHz 36–165                  |
-| `HOP_INTERVAL_MS`    | Dwell time per channel (ms)                                                 | `100`                                       |
-| `MONITOR_TASK_STACK` | Stack size for the monitor task (bytes)                                     | `4096`                                      |
-| `HOP_TASK_STACK`     | Stack size for the channel hopper task (bytes)                              | `1024`                                      |
-| `RING_SIZE`          | Number of packet descriptors in the ring buffer                             | `1024`                                      |
-| `PACKET_POOL_SIZE`   | Number of fixed‑size buffers for frame data                                 | `64`                                        |
-| `PACKET_BUFFER_SIZE` | Maximum frame length that can be stored (bytes)                             | `2346` (max 802.11 frame)                   |
-| `TX_PIN`, `RX_PIN`   | UART pins                                                                   | `_PB_5`, `_PB_4`                            |
-| `BAUD_RATE`          | UART baud rate                                                              | `2000000`                                   |
-| `IDB_FCS_LEN`        | FCS length in Interface Description Block (`0` = no FCS, `4` = FCS present) | `4`                                         |
-| `IDB_TSRESOL`        | Timestamp resolution (`9` = nanoseconds)                                    | `9`                                         |
-| `USE_DWT_CYCCNT`     | Enable nanosecond timestamps using DWT cycle counter                        | defined (comment out to use fallback)       |
-
-## Output Format
-
-The UART stream is a concatenation of pcapng blocks:
-
-1. **Section Header Block (SHB)** – identifies the file as pcapng.
-2. **Interface Description Block (IDB)** – declares one interface with linktype `127` (radiotap) and options like timestamp resolution and FCS length.
-3. **Enhanced Packet Blocks (EPB)** – one per captured frame, containing:
-   - Radiotap header (channel, frequency, RSSI, data rate).
-   - The raw 802.11 frame (possibly truncated to `PACKET_BUFFER_SIZE`).
-
-All blocks are in little‑endian order and are written without any extra framing – the stream is a raw pcapng file.
+---
 
 ## Troubleshooting
 
-- **No data in Wireshark** – verify UART wiring and baud rate. Check that the monitor task actually started (the example `app_example.c` delays 3 s then calls `monitor_start()`).
-- **Garbage output** – wrong baud rate or parity settings. Ensure `BAUD_RATE` matches your terminal/sniffer.
-- **Missing frames** – increase `RING_SIZE` or `PACKET_POOL_SIZE` if the CPU cannot keep up with the UART.
-- **Timestamp resolution** – if `USE_DWT_CYCCNT` is defined but DWT is not available (older Cortex‑M), timestamps will fall back to FreeRTOS tick count (millisecond resolution). Remove the define to use the fallback explicitly.
+| Problem | Solution |
+|---------|----------|
+| No pcapng data in Wireshark | Check UART wiring and baud rate match. Use `stty -F /dev/ttyUSB0 2000000` to verify. |
+| Frames missing / ring buffer full | Increase `CONFIG_RTLMON_RINGBUF_SIZE`. Reduce channel list or hop interval. |
+| Injector doesn't send | Ensure channel is correct (and not hopping away). Check that rate is supported. |
+| Compilation errors | Make sure SDK is up‑to‑date and `CONFIG_WIFI` is enabled. |
+
+---
+
+## License
+
+This project is licensed under the GPLv2 – see [LICENSE](LICENSE) for details.
