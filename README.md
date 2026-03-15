@@ -46,17 +46,6 @@
 
 ---
 
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| No pcapng data in Wireshark | Check UART wiring and baud rate match. Use `stty -F /dev/ttyUSB0 2000000` to verify. |
-| Frames missing / ring buffer full | Increase `CONFIG_RTLMON_RINGBUF_SIZE`. Reduce channel list or hop interval. |
-| Injector doesn't send | Ensure channel is correct (and not hopping away). Check that rate is supported. |
-| Compilation errors | Make sure SDK is up‑to‑date and `CONFIG_WIFI` is enabled. |
-
----
-
 ## License
 
 This project is licensed under the GPLv2 – see [LICENSE](LICENSE) for details.
