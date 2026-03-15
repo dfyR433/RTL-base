@@ -1,6 +1,6 @@
-# RTL-Transceiver
+# RTL-base
 
-**RTL-Transceiver** turns your AmebaDplus (RTL8721Dx) board into a professional dual‑band Wi‑Fi monitor and packet injector.
+**RTL-base** turns your AmebaDplus (RTL8721Dx) board into a professional dual‑band Wi‑Fi monitor and packet injector.
 
 ---
 
@@ -43,19 +43,6 @@
 
 ## Prerequisites
 - [Ameba RTOS SDK](https://github.com/Ameba-AIoT/ameba-rtos)
-
----
-
-## Configuration
-
-| Kconfig option | Default | Description |
-|----------------|---------|-------------|
-| `CONFIG_RTLMON_UART_BAUD` | 2000000 | UART baud rate for pcapng stream |
-| `CONFIG_RTLMON_UART_PORT` | 2 | UART port number (0/1/2) – default 2 is LOGUART |
-| `CONFIG_RTLMON_RINGBUF_SIZE` | 16384 | Size of the ring buffer for captured frames |
-| `CONFIG_RTLMON_MAX_INJECTORS` | 8 | Maximum number of concurrent injectors |
-| `CONFIG_RTLMON_CHANNEL_HOP_LIST` | "1,6,11,36,40,44,48" | Comma‑separated channel list |
-| `CONFIG_RTLMON_CHANNEL_HOP_INTERVAL` | 1000 | Channel hop interval in ms |
 
 ---
 
