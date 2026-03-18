@@ -2,6 +2,7 @@
 #include "wifi_api.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -32,12 +33,22 @@ typedef struct {
 
 static pool_buf_t packet_pool[PACKET_POOL_SIZE];
 
+volatile uint32_t stats_captured = 0;
+volatile uint32_t stats_dropped_ring = 0;
+volatile uint32_t stats_dropped_pool = 0;
+volatile uint32_t stats_peak_pool_used = 0;
+
 static uint8_t* pool_alloc(void) {
     for (int i = 0; i < PACKET_POOL_SIZE; i++) {
         uint32_t expected = 0;
         if (__atomic_compare_exchange_n(&packet_pool[i].in_use,
                                         &expected, 1,
                                         false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            uint32_t used = 0;
+            for (int j = 0; j < PACKET_POOL_SIZE; j++) {
+                if (__atomic_load_n(&packet_pool[j].in_use, __ATOMIC_RELAXED)) used++;
+            }
+            if (used > stats_peak_pool_used) stats_peak_pool_used = used;
             return packet_pool[i].buffer;
         }
     }
@@ -68,10 +79,6 @@ static volatile uint32_t write_idx = 0;
 static volatile uint32_t read_idx  = 0;
 
 static inline uint32_t ring_next(uint32_t i) { return (i + 1) % RING_SIZE; }
-
-static volatile uint32_t stats_captured = 0;
-static volatile uint32_t stats_dropped_ring = 0;
-static volatile uint32_t stats_dropped_pool = 0;
 
 #ifdef USE_DWT_CYCCNT
 static void dwt_init_if_available(void) {
@@ -109,7 +116,7 @@ static uint64_t get_timestamp_ns(void) {
 #endif
 }
 
-static serial_t uart;
+serial_t uart;
 
 static void uart_write_raw(const void *data, size_t len) {
     const uint8_t *p = (const uint8_t*)data;
@@ -119,13 +126,37 @@ static void uart_write_raw(const void *data, size_t len) {
     }
 }
 
+#define WRITER_QUEUE_LENGTH    16
+static QueueHandle_t writer_queue = NULL;
+static TaskHandle_t writer_task_handle = NULL;
+static TaskHandle_t monitor_task_handle = NULL;
+static TaskHandle_t hopper_task_handle = NULL;
+static volatile uint8_t fixed_channel = 0;
+static int monitor_is_running = 0;
+
+static void writer_task(void *param) {
+    (void)param;
+    uint8_t *block;
+    while (1) {
+        if (xQueueReceive(writer_queue, &block, portMAX_DELAY) == pdTRUE) {
+            uint32_t block_len = *(uint32_t*)block;
+            uart_write_raw(block, block_len);
+            vPortFree(block);
+        }
+    }
+}
+
 static void hopper_task(void *arg) {
     (void)arg;
     size_t idx = 0;
     while (1) {
-        uint8_t ch = CHANNEL_LIST[idx];
-        wifi_set_channel(WLAN_IDX, ch);
-        idx = (idx + 1) % CHANNEL_LIST_LEN;
+        if (fixed_channel != 0) {
+            wifi_set_channel(WLAN_IDX, fixed_channel);
+        } else {
+            uint8_t ch = CHANNEL_LIST[idx];
+            wifi_set_channel(WLAN_IDX, ch);
+            idx = (idx + 1) % CHANNEL_LIST_LEN;
+        }
         vTaskDelay(pdMS_TO_TICKS(HOP_INTERVAL_MS));
     }
 }
@@ -291,8 +322,15 @@ static void write_pcapng_epb(rb_entry_t *entry) {
 
     write_u32_le(block + 28 + padded_caplen, block_total);
 
-    uart_write_raw(block, block_total);
-    vPortFree(block);
+    if (writer_queue != NULL) {
+        if (xQueueSend(writer_queue, &block, 0) != pdTRUE) {
+            vPortFree(block);
+            __atomic_add_fetch(&stats_dropped_ring, 1, __ATOMIC_RELAXED);
+        }
+    } else {
+        uart_write_raw(block, block_total);
+        vPortFree(block);
+    }
 }
 
 static void monitor_task(void *param) {
@@ -325,10 +363,12 @@ static void monitor_task(void *param) {
     wifi_promisc_enable(1, &para);
 
     xTaskCreate(hopper_task, "hopper", HOP_TASK_STACK / sizeof(StackType_t),
-                NULL, HOP_TASK_PRIO, NULL);
+                NULL, HOP_TASK_PRIO, &hopper_task_handle);
 
     write_pcapng_shb();
     write_pcapng_idb();
+
+    monitor_task_handle = xTaskGetCurrentTaskHandle();
 
     while (1) {
         uint32_t r = __atomic_load_n(&read_idx, __ATOMIC_RELAXED);
@@ -352,6 +392,45 @@ static void monitor_task(void *param) {
 }
 
 void monitor_start(void) {
+    if (monitor_is_running) return;
+    writer_queue = xQueueCreate(WRITER_QUEUE_LENGTH, sizeof(uint8_t*));
+    xTaskCreate(writer_task, "writer", WRITER_TASK_STACK / sizeof(StackType_t),
+                NULL, WRITER_TASK_PRIO, &writer_task_handle);
     xTaskCreate(monitor_task, "monitor", MONITOR_TASK_STACK / sizeof(StackType_t),
-                NULL, MONITOR_TASK_PRIO, NULL);
+                NULL, MONITOR_TASK_PRIO, &monitor_task_handle);
+    monitor_is_running = 1;
+}
+
+void monitor_stop(void) {
+    if (!monitor_is_running) return;
+    wifi_promisc_enable(0, NULL);
+    if (monitor_task_handle) {
+        vTaskDelete(monitor_task_handle);
+        monitor_task_handle = NULL;
+    }
+    if (hopper_task_handle) {
+        vTaskDelete(hopper_task_handle);
+        hopper_task_handle = NULL;
+    }
+    if (writer_task_handle) {
+        vTaskDelete(writer_task_handle);
+        writer_task_handle = NULL;
+    }
+    if (writer_queue) {
+        vQueueDelete(writer_queue);
+        writer_queue = NULL;
+    }
+    monitor_is_running = 0;
+}
+
+void monitor_set_fixed_channel(uint8_t ch) {
+    fixed_channel = ch;
+}
+
+void monitor_set_hopping(void) {
+    fixed_channel = 0;
+}
+
+int monitor_read_char(void) {
+    return serial_getc(&uart);
 }

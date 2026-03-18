@@ -18,9 +18,9 @@ extern "C" {
 #define INJ_ERR_BUSY        -7
 
 #ifdef INJECT_USE_RTOS
-    #include <freertos/FreeRTOS.h>
-    #include <freertos/semphr.h>
-    #include <freertos/task.h>
+    #include "FreeRTOS.h"
+    #include "semphr.h"
+    #include "task.h"
     #define MGR_LOCK_INIT(mgr)   do { (mgr)->lock = xSemaphoreCreateMutex(); } while(0)
     #define MGR_LOCK_FREE(mgr)   vSemaphoreDelete((mgr)->lock)
     #define MGR_LOCK(mgr)        xSemaphoreTake((mgr)->lock, portMAX_DELAY)
@@ -82,6 +82,9 @@ typedef struct {
     uint32_t packets_sent;
     uint8_t  maxRetries;
     uint8_t  retry_count;
+    uint8_t  retry_backoff;
+    uint32_t tx_errors;
+    int      last_error;
     inject_rate_t tx_rate;
     int8_t   tx_power_dbm;
     inject_flags_t flags;
@@ -97,6 +100,7 @@ typedef struct {
     uint32_t maxPackets;
     uint32_t packets_sent;
     uint8_t  maxRetries;
+    uint32_t tx_errors;
     inject_rate_t tx_rate;
     int8_t   tx_power_dbm;
     inject_flags_t flags;
@@ -166,6 +170,7 @@ int injectorManager_schedule(injectorManager *mgr, uint64_t now_ns);
 
 #ifdef INJECT_USE_RTOS
 int injectorManager_startSchedulerTask(injectorManager *mgr, UBaseType_t priority);
+void injector_timer_isr(void);
 #endif
 
 uint64_t platform_get_time_ns(void);

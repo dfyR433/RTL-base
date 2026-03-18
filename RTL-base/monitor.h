@@ -18,11 +18,16 @@ static const uint8_t CHANNEL_LIST[] = {
 
 #define MONITOR_TASK_STACK      4096
 #define HOP_TASK_STACK          1024
+#define WRITER_TASK_STACK       2048
+
 #define MONITOR_TASK_PRIO       (tskIDLE_PRIORITY + 3)
 #define HOP_TASK_PRIO           (tskIDLE_PRIORITY + 1)
+#define WRITER_TASK_PRIO        (tskIDLE_PRIORITY + 2)
 
 #define RING_SIZE               1024
+#ifndef PACKET_POOL_SIZE
 #define PACKET_POOL_SIZE        64
+#endif
 #define PACKET_BUFFER_SIZE      2346
 
 #define TX_PIN                   _PB_5
@@ -36,6 +41,15 @@ static const uint8_t CHANNEL_LIST[] = {
 #define IDB_FCS_LEN              4
 #define IDB_TSRESOL              9
 
+extern volatile uint32_t stats_captured;
+extern volatile uint32_t stats_dropped_ring;
+extern volatile uint32_t stats_dropped_pool;
+extern volatile uint32_t stats_peak_pool_used;
+
 void monitor_start(void);
+void monitor_stop(void);
+void monitor_set_fixed_channel(uint8_t ch);
+void monitor_set_hopping(void);
+int  monitor_read_char(void);
 
 #endif

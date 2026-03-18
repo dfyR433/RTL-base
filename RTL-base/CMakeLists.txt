@@ -11,6 +11,7 @@ ameba_list_append(private_sources
 
 ameba_list_append(private_definitions
     USE_DWT_CYCCNT
+    INJECT_USE_RTOS
 )
 
 ameba_add_internal_library(ameba_test

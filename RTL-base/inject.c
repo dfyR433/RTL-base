@@ -194,6 +194,9 @@ int injectorManager_startInjectorEx(injectorManager *mgr,
     inj->flags = flags;
     inj->packets_sent = 0;
     inj->retry_count = 0;
+    inj->retry_backoff = 0;
+    inj->tx_errors = 0;
+    inj->last_error = 0;
     inj->active = true;
 
     uint64_t now = platform_get_time_ns();
@@ -246,6 +249,8 @@ int injectorManager_activateInjector(injectorManager *mgr, const char *injectorN
     }
     inj->active = true;
     inj->next_time_ns = platform_get_time_ns();
+    inj->retry_count = 0;
+    inj->retry_backoff = 0;
     MGR_UNLOCK(mgr);
     return INJ_OK;
 }
@@ -344,6 +349,7 @@ int injectorManager_getInjectorInfo(injectorManager *mgr, const char *injectorNa
     info->maxPackets = inj->maxPackets;
     info->packets_sent = inj->packets_sent;
     info->maxRetries = inj->maxRetries;
+    info->tx_errors = inj->tx_errors;
     info->tx_rate = inj->tx_rate;
     info->tx_power_dbm = inj->tx_power_dbm;
     info->flags = inj->flags;
@@ -402,6 +408,23 @@ int injectorManager_schedule(injectorManager *mgr, uint64_t now_ns) {
             if (wifi_set_channel(STA_WLAN_INDEX, inj->channel) == 0) {
                 mgr->current_channel = inj->channel;
             } else {
+                inj->tx_errors++;
+                inj->last_error = INJ_ERR_CHANNEL;
+                inj->retry_count++;
+                uint32_t backoff_us = 1000 * (1 << inj->retry_backoff);
+                if (backoff_us > 1000000) backoff_us = 1000000;
+                inj->next_time_ns = now_ns + backoff_us * 1000;
+                if (inj->retry_backoff < 5) inj->retry_backoff++;
+                if (inj->maxRetries > 0 && inj->retry_count > inj->maxRetries) {
+                    inj->active = false;
+#if INJECT_COPY_PACKET_DATA
+                    if (inj->packetData) {
+                        vPortFree(inj->packetData);
+                        inj->packetData = NULL;
+                    }
+#endif
+                    mgr->injectorCount--;
+                }
                 if (inj->next_time_ns < next_wake) next_wake = inj->next_time_ns;
                 continue;
             }
@@ -413,6 +436,7 @@ int injectorManager_schedule(injectorManager *mgr, uint64_t now_ns) {
             mgr->totalPacketsThisRun++;
             mgr->totalPacketsAllTime++;
             inj->retry_count = 0;
+            inj->retry_backoff = 0;
             any_sent = 1;
 
             inj->next_time_ns += inj->interval_ns;
@@ -422,6 +446,13 @@ int injectorManager_schedule(injectorManager *mgr, uint64_t now_ns) {
             if (inj->next_time_ns < next_wake) next_wake = inj->next_time_ns;
         } else if (ret == -RTK_ERR_WIFI_TX_BUF_FULL) {
             inj->retry_count++;
+            inj->tx_errors++;
+            inj->last_error = ret;
+            uint32_t backoff_us = 1000 * (1 << inj->retry_backoff);
+            if (backoff_us > 1000000) backoff_us = 1000000;
+            inj->next_time_ns = now_ns + backoff_us * 1000;
+            if (inj->retry_backoff < 5) inj->retry_backoff++;
+
             if (inj->maxRetries > 0 && inj->retry_count > inj->maxRetries) {
                 inj->active = false;
 #if INJECT_COPY_PACKET_DATA
@@ -435,6 +466,8 @@ int injectorManager_schedule(injectorManager *mgr, uint64_t now_ns) {
                 if (inj->next_time_ns < next_wake) next_wake = inj->next_time_ns;
             }
         } else {
+            inj->tx_errors++;
+            inj->last_error = ret;
             inj->active = false;
 #if INJECT_COPY_PACKET_DATA
             if (inj->packetData) {
