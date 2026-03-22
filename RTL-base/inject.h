@@ -1,102 +1,92 @@
+/**
+ * @file inject.h
+ * @brief Advanced Wi-Fi Packet Injector Manager (microsecond precision)
+ */
+
 #ifndef INJECT_H
 #define INJECT_H
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "FreeRTOS.h"
+#include "semphr.h"
+#include "task.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define INJ_OK              0
-#define INJ_ERR             -1
-#define INJ_ERR_NOT_FOUND   -2
-#define INJ_ERR_INVALID_ARG -3
-#define INJ_ERR_NO_SPACE    -4
-#define INJ_ERR_TIMER       -5
-#define INJ_ERR_CHANNEL     -6
-#define INJ_ERR_BUSY        -7
+/*============================================================================
+ *                              Error Codes
+ *============================================================================*/
+#define INJ_OK                (0)
+#define INJ_ERR               (-1)
+#define INJ_ERR_NOT_FOUND     (-2)
+#define INJ_ERR_INVALID_ARG   (-3)
+#define INJ_ERR_NO_SPACE      (-4)
+#define INJ_ERR_TIMER         (-5)
+#define INJ_ERR_CHANNEL       (-6)
+#define INJ_ERR_BUSY          (-7)
+#define INJ_ERR_RATE          (-8)
+#define INJ_ERR_POWER         (-9)
 
-#ifdef INJECT_USE_RTOS
-    #include "FreeRTOS.h"
-    #include "semphr.h"
-    #include "task.h"
-    #define MGR_LOCK_INIT(mgr)   do { (mgr)->lock = xSemaphoreCreateMutex(); } while(0)
-    #define MGR_LOCK_FREE(mgr)   vSemaphoreDelete((mgr)->lock)
-    #define MGR_LOCK(mgr)        xSemaphoreTake((mgr)->lock, portMAX_DELAY)
-    #define MGR_UNLOCK(mgr)      xSemaphoreGive((mgr)->lock)
-#else
-    #define MGR_LOCK_INIT(mgr)    ((void)0)
-    #define MGR_LOCK_FREE(mgr)    ((void)0)
-    #define MGR_LOCK(mgr)         ((void)0)
-    #define MGR_UNLOCK(mgr)       ((void)0)
-#endif
-
-#define INJECTOR_NAME_MAX   32
-#define INJECTOR_MAX        16
+/*============================================================================
+ *                            Configuration
+ *============================================================================*/
+#define INJECTOR_NAME_MAX     32
+#define INJECTOR_MAX          16
 
 #ifndef INJECT_COPY_PACKET_DATA
 #define INJECT_COPY_PACKET_DATA 1
 #endif
 
+/*============================================================================
+ *                              Data Types
+ *============================================================================*/
 typedef enum {
-    INJ_RATE_1M,
-    INJ_RATE_2M,
-    INJ_RATE_5_5M,
-    INJ_RATE_11M,
-    INJ_RATE_6M,
-    INJ_RATE_9M,
-    INJ_RATE_12M,
-    INJ_RATE_18M,
-    INJ_RATE_24M,
-    INJ_RATE_36M,
-    INJ_RATE_48M,
-    INJ_RATE_54M,
-    INJ_RATE_MCS0,
-    INJ_RATE_MCS1,
-    INJ_RATE_MCS2,
-    INJ_RATE_MCS3,
-    INJ_RATE_MCS4,
-    INJ_RATE_MCS5,
-    INJ_RATE_MCS6,
-    INJ_RATE_MCS7,
+    INJ_RATE_1M   = 0x02,
+    INJ_RATE_2M   = 0x04,
+    INJ_RATE_5_5M = 0x0B,
+    INJ_RATE_11M  = 0x16,
+    INJ_RATE_6M   = 0x0C,
+    INJ_RATE_9M   = 0x12,
+    INJ_RATE_12M  = 0x18,
+    INJ_RATE_18M  = 0x24,
+    INJ_RATE_24M  = 0x30,
+    INJ_RATE_36M  = 0x48,
+    INJ_RATE_48M  = 0x60,
+    INJ_RATE_54M  = 0x6C,
+    INJ_RATE_MCS0 = 0x80,
+    INJ_RATE_MCS1 = 0x81,
+    INJ_RATE_MCS2 = 0x82,
+    INJ_RATE_MCS3 = 0x83,
+    INJ_RATE_MCS4 = 0x84,
+    INJ_RATE_MCS5 = 0x85,
+    INJ_RATE_MCS6 = 0x86,
+    INJ_RATE_MCS7 = 0x87,
     INJ_RATE_DEFAULT = INJ_RATE_1M
 } inject_rate_t;
 
 typedef enum {
-    INJ_FLAG_NONE           = 0,
-    INJ_FLAG_NO_ACK         = (1 << 0),
-    INJ_FLAG_USE_SHORT_GI   = (1 << 1),
-    INJ_FLAG_AGGREGATE      = (1 << 2),
-    INJ_FLAG_FIXED_CHANNEL  = (1 << 3),
+    INJ_FLAG_NONE          = 0,
+    INJ_FLAG_NO_ACK        = (1 << 0),
+    INJ_FLAG_USE_SHORT_GI  = (1 << 1),
+    INJ_FLAG_AGGREGATE     = (1 << 2),
+    INJ_FLAG_FIXED_CHANNEL = (1 << 3),
 } inject_flags_t;
 
-typedef struct {
-    char name[INJECTOR_NAME_MAX];
-    bool active;
-    uint8_t channel;
-    uint32_t interval_ns;
-    uint64_t next_time_ns;
-    uint64_t start_time_ns;
-    uint32_t maxPackets;
-    uint32_t packets_sent;
-    uint8_t  maxRetries;
-    uint8_t  retry_count;
-    uint8_t  retry_backoff;
-    uint32_t tx_errors;
-    int      last_error;
-    inject_rate_t tx_rate;
-    int8_t   tx_power_dbm;
-    inject_flags_t flags;
-    uint8_t *packetData;
-    uint32_t packetLen;
-} PacketInjector;
+typedef enum {
+    INJ_AC_BE = 0,
+    INJ_AC_BK = 1,
+    INJ_AC_VI = 2,
+    INJ_AC_VO = 3
+} inject_ac_t;
 
 typedef struct {
     char name[INJECTOR_NAME_MAX];
     bool active;
-    uint8_t channel;
-    uint32_t interval_ns;
+    uint8_t channel;                /* 1-13, 36-165 */
+    uint32_t interval_us;           /* microseconds between packets */
     uint32_t maxPackets;
     uint32_t packets_sent;
     uint8_t  maxRetries;
@@ -104,80 +94,110 @@ typedef struct {
     inject_rate_t tx_rate;
     int8_t   tx_power_dbm;
     inject_flags_t flags;
+    inject_ac_t ac_queue;
     uint32_t packetLen;
 } InjectorInfo;
 
-typedef struct {
-    PacketInjector injectors[INJECTOR_MAX];
-    uint8_t injectorCount;
-    uint64_t totalPacketsThisRun;
-    uint64_t totalPacketsAllTime;
-    int current_channel;
-#ifdef INJECT_USE_RTOS
-    SemaphoreHandle_t lock;
-    TaskHandle_t scheduler_task;
-#endif
-} injectorManager;
+typedef struct injectorManager injectorManager;
+typedef void (*injector_timer_cb_t)(injectorManager *manager);
 
-void injectorManager_init(injectorManager *mgr);
-void injectorManager_clearAllInjectors(injectorManager *mgr);
+/*============================================================================
+ *                           Public Functions
+ *============================================================================*/
+injectorManager* injectorManager_create(void);
+void injectorManager_destroy(injectorManager *mgr);
+void injectorManager_clearAll(injectorManager *mgr);
 
-int injectorManager_startInjectorEx(injectorManager *mgr,
-                                    const char *injectorName,
-                                    const uint8_t *packetData,
-                                    uint32_t packetLen,
-                                    uint8_t channel,
-                                    uint64_t start_time_ns,
-                                    uint32_t interval_ns,
-                                    uint32_t maxPackets,
-                                    uint8_t maxRetries,
-                                    inject_rate_t rate,
-                                    int8_t tx_power_dbm,
-                                    inject_flags_t flags);
+/**
+ * @brief Set up an injector with microsecond timing.
+ * @param mgr           Manager instance
+ * @param name          Unique injector name
+ * @param packetData    Packet data (copied if INJECT_COPY_PACKET_DATA is 1)
+ * @param packetLen     Length of packet data
+ * @param channel       Wi-Fi channel (1-13, 36-165)
+ * @param start_time_us Absolute start time (microseconds). 0 = now.
+ * @param interval_us   Interval between transmissions (microseconds)
+ * @param maxPackets    Maximum number of packets (0 = unlimited)
+ * @param hwRetries     Hardware retry limit
+ * @param swRetries     Software retry limit
+ * @param rate          Transmit rate
+ * @param tx_power_dbm  Transmit power (dBm), -1 = default
+ * @param flags         Behaviour flags
+ * @param ac_queue      Access category queue
+ * @return INJ_OK or error code
+ */
+int injectorManager_setInjectorEx(injectorManager *mgr,
+                                  const char *name,
+                                  const uint8_t *packetData,
+                                  uint32_t packetLen,
+                                  uint8_t channel,
+                                  uint64_t start_time_us,
+                                  uint32_t interval_us,
+                                  uint32_t maxPackets,
+                                  uint8_t hwRetries,
+                                  uint8_t swRetries,
+                                  inject_rate_t rate,
+                                  int8_t tx_power_dbm,
+                                  inject_flags_t flags,
+                                  inject_ac_t ac_queue);
 
-static inline int injectorManager_startInjector(injectorManager *mgr,
-                                                const char *injectorName,
-                                                const uint8_t *packetData,
-                                                uint32_t packetLen,
-                                                uint8_t channel,
-                                                uint32_t interval_us,
-                                                uint32_t maxPackets,
-                                                uint8_t maxRetries) {
-    return injectorManager_startInjectorEx(mgr, injectorName, packetData, packetLen,
-                                           channel, 0, interval_us * 1000,
-                                           maxPackets, maxRetries,
-                                           INJ_RATE_DEFAULT, -1, INJ_FLAG_NONE);
+static inline int injectorManager_setInjector(injectorManager *mgr,
+                                              const char *name,
+                                              const uint8_t *packetData,
+                                              uint32_t packetLen,
+                                              uint8_t channel,
+                                              uint32_t interval_us,
+                                              uint32_t maxPackets,
+                                              uint8_t hwRetries) {
+    return injectorManager_setInjectorEx(mgr, name, packetData, packetLen,
+                                         channel, 0, interval_us,
+                                         maxPackets, hwRetries, 5,
+                                         INJ_RATE_DEFAULT, -1,
+                                         INJ_FLAG_NONE, INJ_AC_BE);
 }
 
-int injectorManager_stopInjector(injectorManager *mgr, const char *injectorName);
-int injectorManager_activateInjector(injectorManager *mgr, const char *injectorName);
-int injectorManager_deactivateInjector(injectorManager *mgr, const char *injectorName);
+int injectorManager_deleteInjector(injectorManager *mgr, const char *name);
+int injectorManager_activateInjector(injectorManager *mgr, const char *name);
+int injectorManager_deactivateInjector(injectorManager *mgr, const char *name);
 
-int injectorManager_setInjectorRate(injectorManager *mgr, const char *injectorName, inject_rate_t rate);
-int injectorManager_setInjectorChannel(injectorManager *mgr, const char *injectorName, uint8_t channel);
-int injectorManager_setInjectorPower(injectorManager *mgr, const char *injectorName, int8_t tx_power_dbm);
-int injectorManager_setInjectorIntervalNs(injectorManager *mgr, const char *injectorName, uint32_t interval_ns);
-int injectorManager_setInjectorMaxPackets(injectorManager *mgr, const char *injectorName, uint32_t maxPackets);
-int injectorManager_setInjectorRetries(injectorManager *mgr, const char *injectorName, uint8_t maxRetries);
-int injectorManager_setInjectorFlags(injectorManager *mgr, const char *injectorName, inject_flags_t flags);
-int injectorManager_setInjectorPacketData(injectorManager *mgr, const char *injectorName,
-                                          const uint8_t *newData, uint32_t newLen);
+/* Dynamic parameter updates */
+int injectorManager_setRate(injectorManager *mgr, const char *name, inject_rate_t rate);
+int injectorManager_setChannel(injectorManager *mgr, const char *name, uint8_t channel);
+int injectorManager_setTxPower(injectorManager *mgr, const char *name, int8_t tx_power_dbm);
+int injectorManager_setIntervalUs(injectorManager *mgr, const char *name, uint32_t interval_us);
+int injectorManager_setMaxPackets(injectorManager *mgr, const char *name, uint32_t maxPackets);
+int injectorManager_setHwRetries(injectorManager *mgr, const char *name, uint8_t hwRetries);
+int injectorManager_setSwRetries(injectorManager *mgr, const char *name, uint8_t swRetries);
+int injectorManager_setFlags(injectorManager *mgr, const char *name, inject_flags_t flags);
+int injectorManager_setAcQueue(injectorManager *mgr, const char *name, inject_ac_t ac_queue);
+int injectorManager_setPacketData(injectorManager *mgr, const char *name,
+                                  const uint8_t *newData, uint32_t newLen);
 
-int injectorManager_getInjectorInfo(injectorManager *mgr, const char *injectorName, InjectorInfo *info);
-int injectorManager_listInjectors(injectorManager *mgr, char names[][INJECTOR_NAME_MAX], int maxCount);
+/* Convenience interval helpers */
+static inline int injectorManager_setIntervalMs(injectorManager *mgr, const char *name, uint32_t interval_ms) {
+    return injectorManager_setIntervalUs(mgr, name, interval_ms * 1000ULL);
+}
 
-int injectorManager_schedule(injectorManager *mgr, uint64_t now_ns);
+/* Information and status */
+int injectorManager_getInfo(injectorManager *mgr, const char *name, InjectorInfo *info);
+int injectorManager_listInjectors(injectorManager *mgr,
+                                  char names[][INJECTOR_NAME_MAX],
+                                  int maxCount);
+uint64_t injectorManager_getTotalPackets(injectorManager *mgr);
+uint32_t injectorManager_getActiveCount(injectorManager *mgr);
 
-#ifdef INJECT_USE_RTOS
+/* Scheduling (microsecond time base) */
+int injectorManager_schedule(injectorManager *mgr, uint64_t now_us);
 int injectorManager_startSchedulerTask(injectorManager *mgr, UBaseType_t priority);
-void injector_timer_isr(void);
-#endif
+void injectorManager_timerIsr(void);
+void injectorManager_setTimerCallback(injectorManager *mgr, injector_timer_cb_t callback);
 
-uint64_t platform_get_time_ns(void);
-int platform_set_timer_ns(uint64_t abs_time_ns);
+/* Platform abstraction – must be provided by the application */
+uint64_t platform_get_time_us(void);               /* monotonic microseconds */
+int platform_set_timer_us(uint64_t abs_time_us);   /* one‑shot timer at absolute time */
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif /* INJECT_H */

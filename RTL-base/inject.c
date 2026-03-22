@@ -1,3 +1,8 @@
+/**
+ * @file inject.c
+ * @brief Implementation of the Packet Injector Manager (microsecond precision)
+ */
+
 #include "inject.h"
 #include <string.h>
 #include <stdio.h>
@@ -8,226 +13,122 @@
 #include "wifi_api_types.h"
 #include "wifi_api_ext.h"
 
-__attribute__((weak)) uint64_t platform_get_time_ns(void) {
-    extern uint32_t SystemCoreClock;
-    static uint32_t cyccnt_per_ns = 0;
-    if (cyccnt_per_ns == 0) {
-        cyccnt_per_ns = SystemCoreClock / 1000000;
-        if (cyccnt_per_ns == 0) cyccnt_per_ns = 1;
+/*============================================================================
+ *                      Internal Data Structures
+ *============================================================================*/
+typedef struct {
+    char name[INJECTOR_NAME_MAX];
+    bool in_use;
+    bool active;
+    uint32_t generation;
+    uint8_t channel;
+    uint32_t interval_us;               /* microseconds */
+    uint64_t next_time_us;               /* absolute time in microseconds */
+    uint32_t maxPackets;
+    uint32_t packets_sent;
+    uint8_t  hwRetries;
+    uint8_t  swRetries;
+    uint8_t  swRetryCount;
+    uint8_t  swBackoff;
+    uint32_t tx_errors;
+    int      last_error;
+    inject_rate_t tx_rate;
+    int8_t   tx_power_dbm;
+    inject_flags_t flags;
+    inject_ac_t ac_queue;
+    uint8_t *packetData;
+    uint32_t packetLen;
+} PacketInjector;
+
+struct injectorManager {
+    PacketInjector injectors[INJECTOR_MAX];
+    uint8_t injectorCount;
+    uint64_t totalPacketsAllTime;
+    int current_channel;
+    SemaphoreHandle_t lock;
+    TaskHandle_t scheduler_task;
+    injector_timer_cb_t timer_callback;
+};
+
+/*============================================================================
+ *                      Forward Declarations
+ *============================================================================*/
+static PacketInjector* findInjectorByName(injectorManager *mgr, const char *name);
+static PacketInjector* findFreeSlot(injectorManager *mgr);
+static void deleteInjector(injectorManager *mgr, PacketInjector *inj);
+static int validateChannel(uint8_t channel);
+static int validateRate(inject_rate_t rate);
+static uint8_t rateToRtwRate(inject_rate_t rate);
+static int sendPacket(PacketInjector *inj);
+static uint64_t calcBackoffUs(uint8_t stage);
+static PacketInjector* findInjectorBySlotAndGen(injectorManager *mgr,
+                                                uint32_t slot,
+                                                uint32_t generation);
+static void schedulerTask(void *param);
+
+/*============================================================================
+ *                      Weak Default Implementations
+ *============================================================================*/
+
+/**
+ * @brief Default implementation of platform_get_time_us.
+ *        Uses DWT cycle counter if available; otherwise returns 0.
+ *        Applications should provide their own high‑resolution timer.
+ */
+__attribute__((weak)) uint64_t platform_get_time_us(void) {
+    static uint32_t cyccnt_per_us = 0;
+    static uint32_t last_cycles = 0;
+    static uint64_t us_offset = 0;
+
+    taskENTER_CRITICAL();
+    if (cyccnt_per_us == 0) {
+        extern uint32_t SystemCoreClock;
+        cyccnt_per_us = SystemCoreClock / 1000000;   /* cycles per µs */
+        if (cyccnt_per_us == 0) cyccnt_per_us = 1;
     }
-    uint32_t cycles = *((volatile uint32_t*)0xE0001004);
-    static uint64_t last_cycles = 0, ns_offset = 0;
+    uint32_t cycles = *((volatile uint32_t*)0xE0001004); /* DWT_CYCCNT */
+    uint64_t delta;
     if (cycles < last_cycles) {
-        ns_offset += (0xFFFFFFFFULL - last_cycles + cycles) * 1000 / cyccnt_per_ns;
+        delta = (0x100000000ULL - last_cycles) + cycles;
     } else {
-        ns_offset += (cycles - last_cycles) * 1000 / cyccnt_per_ns;
+        delta = (uint64_t)(cycles - last_cycles);
     }
+    us_offset += delta / cyccnt_per_us;
     last_cycles = cycles;
-    return ns_offset;
+    uint64_t ret = us_offset;
+    taskEXIT_CRITICAL();
+    return ret;
 }
 
-__attribute__((weak)) int platform_set_timer_ns(uint64_t abs_time_ns) {
-    (void)abs_time_ns;
-    return -1;
+__attribute__((weak)) int platform_set_timer_us(uint64_t abs_time_us) {
+    (void)abs_time_us;
+    return -1;   /* not implemented */
 }
 
-static PacketInjector* find_injector_by_name(injectorManager *mgr, const char *name) {
-    for (int i = 0; i < INJECTOR_MAX; i++) {
-        if (mgr->injectors[i].active && strcmp(mgr->injectors[i].name, name) == 0) {
-            return &mgr->injectors[i];
-        }
-    }
-    return NULL;
-}
-
-static PacketInjector* find_free_slot(injectorManager *mgr) {
-    for (int i = 0; i < INJECTOR_MAX; i++) {
-        if (!mgr->injectors[i].active) {
-            return &mgr->injectors[i];
-        }
-    }
-    return NULL;
-}
-
-#ifndef RTW_RATE_1M
-#define RTW_RATE_1M     0x02
-#define RTW_RATE_2M     0x04
-#define RTW_RATE_5_5M   0x0B
-#define RTW_RATE_11M    0x16
-#define RTW_RATE_6M     0x0C
-#define RTW_RATE_9M     0x12
-#define RTW_RATE_12M    0x18
-#define RTW_RATE_18M    0x24
-#define RTW_RATE_24M    0x30
-#define RTW_RATE_36M    0x48
-#define RTW_RATE_48M    0x60
-#define RTW_RATE_54M    0x6C
-#define RTW_RATE_MCS0   0x80
-#define RTW_RATE_MCS1   0x81
-#define RTW_RATE_MCS2   0x82
-#define RTW_RATE_MCS3   0x83
-#define RTW_RATE_MCS4   0x84
-#define RTW_RATE_MCS5   0x85
-#define RTW_RATE_MCS6   0x86
-#define RTW_RATE_MCS7   0x87
-#endif
-
-static uint8_t rate_to_rtw_rate(inject_rate_t rate) {
-    switch (rate) {
-        case INJ_RATE_1M:   return RTW_RATE_1M;
-        case INJ_RATE_2M:   return RTW_RATE_2M;
-        case INJ_RATE_5_5M: return RTW_RATE_5_5M;
-        case INJ_RATE_11M:  return RTW_RATE_11M;
-        case INJ_RATE_6M:   return RTW_RATE_6M;
-        case INJ_RATE_9M:   return RTW_RATE_9M;
-        case INJ_RATE_12M:  return RTW_RATE_12M;
-        case INJ_RATE_18M:  return RTW_RATE_18M;
-        case INJ_RATE_24M:  return RTW_RATE_24M;
-        case INJ_RATE_36M:  return RTW_RATE_36M;
-        case INJ_RATE_48M:  return RTW_RATE_48M;
-        case INJ_RATE_54M:  return RTW_RATE_54M;
-        case INJ_RATE_MCS0: return RTW_RATE_MCS0;
-        case INJ_RATE_MCS1: return RTW_RATE_MCS1;
-        case INJ_RATE_MCS2: return RTW_RATE_MCS2;
-        case INJ_RATE_MCS3: return RTW_RATE_MCS3;
-        case INJ_RATE_MCS4: return RTW_RATE_MCS4;
-        case INJ_RATE_MCS5: return RTW_RATE_MCS5;
-        case INJ_RATE_MCS6: return RTW_RATE_MCS6;
-        case INJ_RATE_MCS7: return RTW_RATE_MCS7;
-        default:            return RTW_RATE_1M;
-    }
-}
-
-static int send_packet(PacketInjector *inj) {
-    struct rtw_raw_frame_desc desc;
-    memset(&desc, 0, sizeof(desc));
-    desc.wlan_idx = STA_WLAN_INDEX;
-    desc.buf = inj->packetData;
-    desc.buf_len = inj->packetLen;
-    desc.tx_rate = rate_to_rtw_rate(inj->tx_rate);
-    desc.retry_limit = inj->maxRetries;
-    desc.ac_queue = 0;
-    desc.sgi = (inj->flags & INJ_FLAG_USE_SHORT_GI) ? 1 : 0;
-    desc.agg_en = (inj->flags & INJ_FLAG_AGGREGATE) ? 1 : 0;
-    return wifi_send_raw_frame(&desc);
-}
-
-void injectorManager_init(injectorManager *mgr) {
-    memset(mgr, 0, sizeof(injectorManager));
-    MGR_LOCK_INIT(mgr);
-    mgr->injectorCount = 0;
-    mgr->current_channel = -1;
-}
-
-void injectorManager_clearAllInjectors(injectorManager *mgr) {
-    MGR_LOCK(mgr);
+/*============================================================================
+ *                      Internal Helpers
+ *============================================================================*/
+static PacketInjector* findInjectorByName(injectorManager *mgr, const char *name) {
     for (int i = 0; i < INJECTOR_MAX; i++) {
         PacketInjector *inj = &mgr->injectors[i];
-        if (inj->active) {
-#if INJECT_COPY_PACKET_DATA
-            if (inj->packetData) {
-                vPortFree(inj->packetData);
-                inj->packetData = NULL;
-            }
-#endif
-            inj->active = false;
+        if (inj->in_use && strcmp(inj->name, name) == 0) {
+            return inj;
         }
     }
-    mgr->injectorCount = 0;
-    MGR_UNLOCK(mgr);
+    return NULL;
 }
 
-int injectorManager_startInjectorEx(injectorManager *mgr,
-                                    const char *injectorName,
-                                    const uint8_t *packetData,
-                                    uint32_t packetLen,
-                                    uint8_t channel,
-                                    uint64_t start_time_ns,
-                                    uint32_t interval_ns,
-                                    uint32_t maxPackets,
-                                    uint8_t maxRetries,
-                                    inject_rate_t rate,
-                                    int8_t tx_power_dbm,
-                                    inject_flags_t flags) {
-    if (!mgr || !injectorName || !packetData || packetLen == 0) {
-        return INJ_ERR_INVALID_ARG;
+static PacketInjector* findFreeSlot(injectorManager *mgr) {
+    for (int i = 0; i < INJECTOR_MAX; i++) {
+        if (!mgr->injectors[i].in_use) {
+            return &mgr->injectors[i];
+        }
     }
-    if (strlen(injectorName) >= INJECTOR_NAME_MAX) {
-        return INJ_ERR_INVALID_ARG;
-    }
-
-    MGR_LOCK(mgr);
-
-    if (find_injector_by_name(mgr, injectorName) != NULL) {
-        MGR_UNLOCK(mgr);
-        return INJ_ERR;
-    }
-
-    PacketInjector *inj = find_free_slot(mgr);
-    if (!inj) {
-        MGR_UNLOCK(mgr);
-        return INJ_ERR_NO_SPACE;
-    }
-
-    memset(inj, 0, sizeof(PacketInjector));
-    strncpy(inj->name, injectorName, INJECTOR_NAME_MAX - 1);
-    inj->name[INJECTOR_NAME_MAX - 1] = '\0';
-
-#if INJECT_COPY_PACKET_DATA
-    uint8_t *copy = pvPortMalloc(packetLen);
-    if (!copy) {
-        MGR_UNLOCK(mgr);
-        return INJ_ERR_NO_SPACE;
-    }
-    memcpy(copy, packetData, packetLen);
-    inj->packetData = copy;
-#else
-    inj->packetData = (uint8_t*)packetData;
-#endif
-    inj->packetLen = packetLen;
-    inj->channel = channel;
-    inj->interval_ns = interval_ns;
-    inj->maxPackets = maxPackets;
-    inj->maxRetries = maxRetries;
-    inj->tx_rate = rate;
-    inj->tx_power_dbm = tx_power_dbm;
-    inj->flags = flags;
-    inj->packets_sent = 0;
-    inj->retry_count = 0;
-    inj->retry_backoff = 0;
-    inj->tx_errors = 0;
-    inj->last_error = 0;
-    inj->active = true;
-
-    uint64_t now = platform_get_time_ns();
-    if (start_time_ns == 0 || start_time_ns <= now) {
-        inj->next_time_ns = now;
-    } else {
-        inj->next_time_ns = start_time_ns;
-    }
-
-    mgr->injectorCount++;
-
-#ifdef INJECT_USE_RTOS
-    if (mgr->scheduler_task != NULL) {
-        vTaskResume(mgr->scheduler_task);
-    }
-#endif
-
-    MGR_UNLOCK(mgr);
-    return INJ_OK;
+    return NULL;
 }
 
-int injectorManager_stopInjector(injectorManager *mgr, const char *injectorName) {
-    if (!mgr || !injectorName) return INJ_ERR_INVALID_ARG;
-
-    MGR_LOCK(mgr);
-    PacketInjector *inj = find_injector_by_name(mgr, injectorName);
-    if (!inj) {
-        MGR_UNLOCK(mgr);
-        return INJ_ERR_NOT_FOUND;
-    }
-
+static void deleteInjector(injectorManager *mgr, PacketInjector *inj) {
+    if (!inj->in_use) return;
     inj->active = false;
 #if INJECT_COPY_PACKET_DATA
     if (inj->packetData) {
@@ -235,299 +136,545 @@ int injectorManager_stopInjector(injectorManager *mgr, const char *injectorName)
         inj->packetData = NULL;
     }
 #endif
+    inj->in_use = false;
     mgr->injectorCount--;
-    MGR_UNLOCK(mgr);
+}
+
+static int validateChannel(uint8_t channel) {
+    if (channel >= 1 && channel <= 13) return INJ_OK;
+    if (channel >= 36 && channel <= 165) return INJ_OK;
+    return INJ_ERR_INVALID_ARG;
+}
+
+static int validateRate(inject_rate_t rate) {
+    (void)rate;
     return INJ_OK;
 }
 
-int injectorManager_activateInjector(injectorManager *mgr, const char *injectorName) {
-    MGR_LOCK(mgr);
-    PacketInjector *inj = find_injector_by_name(mgr, injectorName);
-    if (!inj) {
-        MGR_UNLOCK(mgr);
-        return INJ_ERR_NOT_FOUND;
+static uint8_t rateToRtwRate(inject_rate_t rate) {
+    return (uint8_t)rate;
+}
+
+static int sendPacket(PacketInjector *inj) {
+    struct rtw_raw_frame_desc desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.wlan_idx    = STA_WLAN_INDEX;
+    desc.buf         = inj->packetData;
+    desc.buf_len     = inj->packetLen;
+    desc.tx_rate     = rateToRtwRate(inj->tx_rate);
+    desc.retry_limit = inj->hwRetries;
+    desc.ac_queue    = inj->ac_queue;
+    desc.sgi         = (inj->flags & INJ_FLAG_USE_SHORT_GI) ? 1 : 0;
+    desc.agg_en      = (inj->flags & INJ_FLAG_AGGREGATE) ? 1 : 0;
+    return wifi_send_raw_frame(&desc);
+}
+
+static uint64_t calcBackoffUs(uint8_t stage) {
+    if (stage > 10) stage = 10;
+    uint32_t backoff_us = 1000U << stage;   /* 1ms, 2ms, 4ms... */
+    if (backoff_us > 1000000U) backoff_us = 1000000U;
+    return (uint64_t)backoff_us;
+}
+
+static PacketInjector* findInjectorBySlotAndGen(injectorManager *mgr,
+                                                uint32_t slot,
+                                                uint32_t generation) {
+    if (!mgr || slot >= INJECTOR_MAX) return NULL;
+    PacketInjector *inj = &mgr->injectors[slot];
+    if (!inj->in_use || inj->generation != generation) return NULL;
+    return inj;
+}
+
+/*============================================================================
+ *                      Public API Implementation
+ *============================================================================*/
+injectorManager* injectorManager_create(void) {
+    injectorManager *mgr = pvPortMalloc(sizeof(injectorManager));
+    if (!mgr) return NULL;
+    memset(mgr, 0, sizeof(injectorManager));
+    mgr->lock = xSemaphoreCreateMutex();
+    mgr->current_channel = -1;
+    mgr->timer_callback = NULL;
+    return mgr;
+}
+
+void injectorManager_destroy(injectorManager *mgr) {
+    if (!mgr) return;
+    injectorManager_clearAll(mgr);
+    if (mgr->lock) vSemaphoreDelete(mgr->lock);
+    vPortFree(mgr);
+}
+
+void injectorManager_clearAll(injectorManager *mgr) {
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    for (int i = 0; i < INJECTOR_MAX; i++) {
+        PacketInjector *inj = &mgr->injectors[i];
+        if (inj->in_use) {
+            deleteInjector(mgr, inj);
+        }
     }
-    inj->active = true;
-    inj->next_time_ns = platform_get_time_ns();
-    inj->retry_count = 0;
-    inj->retry_backoff = 0;
-    MGR_UNLOCK(mgr);
-    return INJ_OK;
+    mgr->injectorCount = 0;
+    mgr->current_channel = -1;
+    xSemaphoreGive(mgr->lock);
 }
 
-int injectorManager_deactivateInjector(injectorManager *mgr, const char *injectorName) {
-    MGR_LOCK(mgr);
-    PacketInjector *inj = find_injector_by_name(mgr, injectorName);
-    if (!inj) {
-        MGR_UNLOCK(mgr);
-        return INJ_ERR_NOT_FOUND;
+int injectorManager_setInjectorEx(injectorManager *mgr,
+                                  const char *name,
+                                  const uint8_t *packetData,
+                                  uint32_t packetLen,
+                                  uint8_t channel,
+                                  uint64_t start_time_us,
+                                  uint32_t interval_us,
+                                  uint32_t maxPackets,
+                                  uint8_t hwRetries,
+                                  uint8_t swRetries,
+                                  inject_rate_t rate,
+                                  int8_t tx_power_dbm,
+                                  inject_flags_t flags,
+                                  inject_ac_t ac_queue) {
+    int ret;
+
+    if (!mgr || !name || !packetData || packetLen == 0) return INJ_ERR_INVALID_ARG;
+    if (strlen(name) >= INJECTOR_NAME_MAX) return INJ_ERR_INVALID_ARG;
+    ret = validateChannel(channel);
+    if (ret != INJ_OK) return ret;
+    ret = validateRate(rate);
+    if (ret != INJ_OK) return ret;
+
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+
+    PacketInjector *existing = findInjectorByName(mgr, name);
+    if (existing) {
+        deleteInjector(mgr, existing);
     }
-    inj->active = false;
-    MGR_UNLOCK(mgr);
-    return INJ_OK;
-}
 
-#define SET_INJECTOR_FIELD(mgr, name, field, value) \
-    do { \
-        MGR_LOCK(mgr); \
-        PacketInjector *inj = find_injector_by_name(mgr, name); \
-        if (!inj) { \
-            MGR_UNLOCK(mgr); \
-            return INJ_ERR_NOT_FOUND; \
-        } \
-        inj->field = value; \
-        MGR_UNLOCK(mgr); \
-        return INJ_OK; \
-    } while(0)
-
-int injectorManager_setInjectorRate(injectorManager *mgr, const char *injectorName, inject_rate_t rate) {
-    SET_INJECTOR_FIELD(mgr, injectorName, tx_rate, rate);
-}
-int injectorManager_setInjectorChannel(injectorManager *mgr, const char *injectorName, uint8_t channel) {
-    SET_INJECTOR_FIELD(mgr, injectorName, channel, channel);
-}
-int injectorManager_setInjectorPower(injectorManager *mgr, const char *injectorName, int8_t tx_power_dbm) {
-    SET_INJECTOR_FIELD(mgr, injectorName, tx_power_dbm, tx_power_dbm);
-}
-int injectorManager_setInjectorIntervalNs(injectorManager *mgr, const char *injectorName, uint32_t interval_ns) {
-    SET_INJECTOR_FIELD(mgr, injectorName, interval_ns, interval_ns);
-}
-int injectorManager_setInjectorMaxPackets(injectorManager *mgr, const char *injectorName, uint32_t maxPackets) {
-    SET_INJECTOR_FIELD(mgr, injectorName, maxPackets, maxPackets);
-}
-int injectorManager_setInjectorRetries(injectorManager *mgr, const char *injectorName, uint8_t maxRetries) {
-    SET_INJECTOR_FIELD(mgr, injectorName, maxRetries, maxRetries);
-}
-int injectorManager_setInjectorFlags(injectorManager *mgr, const char *injectorName, inject_flags_t flags) {
-    SET_INJECTOR_FIELD(mgr, injectorName, flags, flags);
-}
-
-int injectorManager_setInjectorPacketData(injectorManager *mgr, const char *injectorName,
-                                          const uint8_t *newData, uint32_t newLen) {
-    if (!newData || newLen == 0) return INJ_ERR_INVALID_ARG;
-
-    MGR_LOCK(mgr);
-    PacketInjector *inj = find_injector_by_name(mgr, injectorName);
+    PacketInjector *inj = findFreeSlot(mgr);
     if (!inj) {
-        MGR_UNLOCK(mgr);
-        return INJ_ERR_NOT_FOUND;
+        xSemaphoreGive(mgr->lock);
+        return INJ_ERR_NO_SPACE;
     }
 
 #if INJECT_COPY_PACKET_DATA
+    uint8_t *copy = pvPortMalloc(packetLen);
+    if (!copy) {
+        xSemaphoreGive(mgr->lock);
+        return INJ_ERR_NO_SPACE;
+    }
+    memcpy(copy, packetData, packetLen);
+#else
+    uint8_t *copy = (uint8_t*)packetData;
+#endif
+
+    uint32_t old_gen = inj->generation;
+    memset(inj, 0, sizeof(PacketInjector));
+    inj->generation = old_gen + 1;
+    if (inj->generation == 0) inj->generation = 1;
+
+    strncpy(inj->name, name, INJECTOR_NAME_MAX - 1);
+    inj->name[INJECTOR_NAME_MAX - 1] = '\0';
+    inj->in_use = true;
+    inj->active = true;
+    inj->channel = channel;
+    inj->interval_us = interval_us;
+    inj->maxPackets = maxPackets;
+    inj->hwRetries = hwRetries;
+    inj->swRetries = swRetries;
+    inj->tx_rate = rate;
+    inj->tx_power_dbm = tx_power_dbm;
+    inj->flags = flags;
+    inj->ac_queue = ac_queue;
+    inj->packetData = copy;
+    inj->packetLen = packetLen;
+
+    uint64_t now = platform_get_time_us();
+    inj->next_time_us = (start_time_us == 0 || start_time_us <= now) ? now : start_time_us;
+
+    mgr->injectorCount++;
+
+    if (mgr->scheduler_task != NULL) {
+        vTaskResume(mgr->scheduler_task);
+    }
+
+    xSemaphoreGive(mgr->lock);
+    return INJ_OK;
+}
+
+int injectorManager_deleteInjector(injectorManager *mgr, const char *name) {
+    if (!mgr || !name) return INJ_ERR_INVALID_ARG;
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    PacketInjector *inj = findInjectorByName(mgr, name);
+    if (!inj) {
+        xSemaphoreGive(mgr->lock);
+        return INJ_ERR_NOT_FOUND;
+    }
+    deleteInjector(mgr, inj);
+    xSemaphoreGive(mgr->lock);
+    return INJ_OK;
+}
+
+int injectorManager_activateInjector(injectorManager *mgr, const char *name) {
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    PacketInjector *inj = findInjectorByName(mgr, name);
+    if (!inj) {
+        xSemaphoreGive(mgr->lock);
+        return INJ_ERR_NOT_FOUND;
+    }
+    inj->active = true;
+    inj->next_time_us = platform_get_time_us();
+    inj->swRetryCount = 0;
+    inj->swBackoff = 0;
+    xSemaphoreGive(mgr->lock);
+    return INJ_OK;
+}
+
+int injectorManager_deactivateInjector(injectorManager *mgr, const char *name) {
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    PacketInjector *inj = findInjectorByName(mgr, name);
+    if (!inj) {
+        xSemaphoreGive(mgr->lock);
+        return INJ_ERR_NOT_FOUND;
+    }
+    inj->active = false;
+    xSemaphoreGive(mgr->lock);
+    return INJ_OK;
+}
+
+/*============================================================================
+ *                      Dynamic Parameter Updates
+ *============================================================================*/
+#define SET_FIELD(field, value) \
+    do { \
+        xSemaphoreTake(mgr->lock, portMAX_DELAY); \
+        PacketInjector *inj = findInjectorByName(mgr, name); \
+        if (!inj) { \
+            xSemaphoreGive(mgr->lock); \
+            return INJ_ERR_NOT_FOUND; \
+        } \
+        inj->field = value; \
+        xSemaphoreGive(mgr->lock); \
+        return INJ_OK; \
+    } while(0)
+
+int injectorManager_setRate(injectorManager *mgr, const char *name, inject_rate_t rate) {
+    int ret = validateRate(rate);
+    if (ret != INJ_OK) return ret;
+    SET_FIELD(tx_rate, rate);
+}
+int injectorManager_setChannel(injectorManager *mgr, const char *name, uint8_t channel) {
+    int ret = validateChannel(channel);
+    if (ret != INJ_OK) return ret;
+    SET_FIELD(channel, channel);
+}
+int injectorManager_setTxPower(injectorManager *mgr, const char *name, int8_t tx_power_dbm) {
+    SET_FIELD(tx_power_dbm, tx_power_dbm);
+}
+int injectorManager_setIntervalUs(injectorManager *mgr, const char *name, uint32_t interval_us) {
+    SET_FIELD(interval_us, interval_us);
+}
+int injectorManager_setMaxPackets(injectorManager *mgr, const char *name, uint32_t maxPackets) {
+    SET_FIELD(maxPackets, maxPackets);
+}
+int injectorManager_setHwRetries(injectorManager *mgr, const char *name, uint8_t hwRetries) {
+    SET_FIELD(hwRetries, hwRetries);
+}
+int injectorManager_setSwRetries(injectorManager *mgr, const char *name, uint8_t swRetries) {
+    SET_FIELD(swRetries, swRetries);
+}
+int injectorManager_setFlags(injectorManager *mgr, const char *name, inject_flags_t flags) {
+    SET_FIELD(flags, flags);
+}
+int injectorManager_setAcQueue(injectorManager *mgr, const char *name, inject_ac_t ac_queue) {
+    SET_FIELD(ac_queue, ac_queue);
+}
+
+int injectorManager_setPacketData(injectorManager *mgr, const char *name,
+                                  const uint8_t *newData, uint32_t newLen) {
+    if (!newData || newLen == 0) return INJ_ERR_INVALID_ARG;
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    PacketInjector *inj = findInjectorByName(mgr, name);
+    if (!inj) {
+        xSemaphoreGive(mgr->lock);
+        return INJ_ERR_NOT_FOUND;
+    }
+#if INJECT_COPY_PACKET_DATA
     uint8_t *copy = pvPortMalloc(newLen);
     if (!copy) {
-        MGR_UNLOCK(mgr);
+        xSemaphoreGive(mgr->lock);
         return INJ_ERR_NO_SPACE;
     }
     memcpy(copy, newData, newLen);
-    if (inj->packetData) {
-        vPortFree(inj->packetData);
-    }
+    if (inj->packetData) vPortFree(inj->packetData);
     inj->packetData = copy;
 #else
     inj->packetData = (uint8_t*)newData;
 #endif
     inj->packetLen = newLen;
-    MGR_UNLOCK(mgr);
+    xSemaphoreGive(mgr->lock);
     return INJ_OK;
 }
 
-int injectorManager_getInjectorInfo(injectorManager *mgr, const char *injectorName, InjectorInfo *info) {
+/*============================================================================
+ *                      Information and Status
+ *============================================================================*/
+int injectorManager_getInfo(injectorManager *mgr, const char *name, InjectorInfo *info) {
     if (!info) return INJ_ERR_INVALID_ARG;
-
-    MGR_LOCK(mgr);
-    PacketInjector *inj = find_injector_by_name(mgr, injectorName);
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    PacketInjector *inj = findInjectorByName(mgr, name);
     if (!inj) {
-        MGR_UNLOCK(mgr);
+        xSemaphoreGive(mgr->lock);
         return INJ_ERR_NOT_FOUND;
     }
-
     strncpy(info->name, inj->name, INJECTOR_NAME_MAX);
     info->active = inj->active;
     info->channel = inj->channel;
-    info->interval_ns = inj->interval_ns;
+    info->interval_us = inj->interval_us;
     info->maxPackets = inj->maxPackets;
     info->packets_sent = inj->packets_sent;
-    info->maxRetries = inj->maxRetries;
+    info->maxRetries = inj->hwRetries;
     info->tx_errors = inj->tx_errors;
     info->tx_rate = inj->tx_rate;
     info->tx_power_dbm = inj->tx_power_dbm;
     info->flags = inj->flags;
+    info->ac_queue = inj->ac_queue;
     info->packetLen = inj->packetLen;
-
-    MGR_UNLOCK(mgr);
+    xSemaphoreGive(mgr->lock);
     return INJ_OK;
 }
 
-int injectorManager_listInjectors(injectorManager *mgr, char names[][INJECTOR_NAME_MAX], int maxCount) {
+int injectorManager_listInjectors(injectorManager *mgr,
+                                  char names[][INJECTOR_NAME_MAX],
+                                  int maxCount) {
     if (!names || maxCount <= 0) return INJ_ERR_INVALID_ARG;
-
-    MGR_LOCK(mgr);
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
     int count = 0;
     for (int i = 0; i < INJECTOR_MAX && count < maxCount; i++) {
-        if (mgr->injectors[i].active) {
+        if (mgr->injectors[i].in_use) {
             strncpy(names[count], mgr->injectors[i].name, INJECTOR_NAME_MAX);
             names[count][INJECTOR_NAME_MAX - 1] = '\0';
             count++;
         }
     }
-    MGR_UNLOCK(mgr);
+    xSemaphoreGive(mgr->lock);
     return count;
 }
 
-int injectorManager_schedule(injectorManager *mgr, uint64_t now_ns) {
+uint64_t injectorManager_getTotalPackets(injectorManager *mgr) {
+    uint64_t total;
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    total = mgr->totalPacketsAllTime;
+    xSemaphoreGive(mgr->lock);
+    return total;
+}
+
+uint32_t injectorManager_getActiveCount(injectorManager *mgr) {
+    uint32_t count = 0;
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    for (int i = 0; i < INJECTOR_MAX; i++) {
+        if (mgr->injectors[i].in_use && mgr->injectors[i].active) count++;
+    }
+    xSemaphoreGive(mgr->lock);
+    return count;
+}
+
+/*============================================================================
+ *                      Scheduling (Three‑Phase, microsecond)
+ *============================================================================*/
+int injectorManager_schedule(injectorManager *mgr, uint64_t now_us) {
     if (!mgr) return INJ_ERR_INVALID_ARG;
 
-    MGR_LOCK(mgr);
+    typedef struct {
+        uint32_t slot;
+        uint32_t generation;
+        uint8_t channel;
+        uint8_t *packetData;
+        uint32_t packetLen;
+        inject_rate_t tx_rate;
+        uint8_t hwRetries;
+        inject_ac_t ac_queue;
+        inject_flags_t flags;
+        int8_t tx_power_dbm;
+    } TxJob;
 
-    uint64_t next_wake = UINT64_MAX;
-    int any_sent = 0;
+    TxJob jobs[INJECTOR_MAX];
+    int job_count = 0;
+    int packets_sent = 0;
+
+    /* Phase 1: collect due jobs under lock */
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
 
     for (int i = 0; i < INJECTOR_MAX; i++) {
         PacketInjector *inj = &mgr->injectors[i];
-        if (!inj->active) continue;
+        if (!inj->in_use || !inj->active) continue;
 
         if (inj->maxPackets > 0 && inj->packets_sent >= inj->maxPackets) {
-            inj->active = false;
-#if INJECT_COPY_PACKET_DATA
-            if (inj->packetData) {
-                vPortFree(inj->packetData);
-                inj->packetData = NULL;
-            }
-#endif
-            mgr->injectorCount--;
+            deleteInjector(mgr, inj);
             continue;
         }
 
-        if (inj->next_time_ns > now_ns) {
-            if (inj->next_time_ns < next_wake) next_wake = inj->next_time_ns;
-            continue;
-        }
+        if (inj->next_time_us > now_us) continue;
 
-        if (!(inj->flags & INJ_FLAG_FIXED_CHANNEL) && mgr->current_channel != inj->channel) {
-            if (wifi_set_channel(STA_WLAN_INDEX, inj->channel) == 0) {
-                mgr->current_channel = inj->channel;
+        if (job_count < INJECTOR_MAX) {
+            jobs[job_count].slot         = (uint32_t)i;
+            jobs[job_count].generation   = inj->generation;
+            jobs[job_count].channel      = inj->channel;
+            jobs[job_count].packetData   = inj->packetData;
+            jobs[job_count].packetLen    = inj->packetLen;
+            jobs[job_count].tx_rate      = inj->tx_rate;
+            jobs[job_count].hwRetries    = inj->hwRetries;
+            jobs[job_count].ac_queue     = inj->ac_queue;
+            jobs[job_count].flags        = inj->flags;
+            jobs[job_count].tx_power_dbm = inj->tx_power_dbm;
+            job_count++;
+        }
+    }
+
+    xSemaphoreGive(mgr->lock);
+
+    /* Phase 2: transmit without the lock */
+    int hw_channel = -1;
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    hw_channel = mgr->current_channel;
+    xSemaphoreGive(mgr->lock);
+
+    for (int j = 0; j < job_count; j++) {
+        const TxJob *job = &jobs[j];
+        int ret = 0;
+
+        if (!(job->flags & INJ_FLAG_FIXED_CHANNEL) && hw_channel != (int)job->channel) {
+            ret = wifi_set_channel(STA_WLAN_INDEX, job->channel);
+            if (ret == 0) {
+                hw_channel = job->channel;
+                xSemaphoreTake(mgr->lock, portMAX_DELAY);
+                mgr->current_channel = hw_channel;
+                xSemaphoreGive(mgr->lock);
             } else {
-                inj->tx_errors++;
-                inj->last_error = INJ_ERR_CHANNEL;
-                inj->retry_count++;
-                uint32_t backoff_us = 1000 * (1 << inj->retry_backoff);
-                if (backoff_us > 1000000) backoff_us = 1000000;
-                inj->next_time_ns = now_ns + backoff_us * 1000;
-                if (inj->retry_backoff < 5) inj->retry_backoff++;
-                if (inj->maxRetries > 0 && inj->retry_count > inj->maxRetries) {
-                    inj->active = false;
-#if INJECT_COPY_PACKET_DATA
-                    if (inj->packetData) {
-                        vPortFree(inj->packetData);
-                        inj->packetData = NULL;
-                    }
-#endif
-                    mgr->injectorCount--;
-                }
-                if (inj->next_time_ns < next_wake) next_wake = inj->next_time_ns;
-                continue;
+                ret = INJ_ERR_CHANNEL;
             }
         }
 
-        int ret = send_packet(inj);
+        if (ret == 0) {
+            PacketInjector temp_inj = {
+                .packetData   = job->packetData,
+                .packetLen    = job->packetLen,
+                .tx_rate      = job->tx_rate,
+                .hwRetries    = job->hwRetries,
+                .ac_queue     = job->ac_queue,
+                .flags        = job->flags,
+                .tx_power_dbm = job->tx_power_dbm
+            };
+            ret = sendPacket(&temp_inj);
+        }
+
+        /* Phase 3: re‑lock and update the injector */
+        xSemaphoreTake(mgr->lock, portMAX_DELAY);
+        PacketInjector *inj = findInjectorBySlotAndGen(mgr, job->slot, job->generation);
+        if (!inj) {
+            xSemaphoreGive(mgr->lock);
+            continue;
+        }
+
         if (ret == 0) {
             inj->packets_sent++;
-            mgr->totalPacketsThisRun++;
             mgr->totalPacketsAllTime++;
-            inj->retry_count = 0;
-            inj->retry_backoff = 0;
-            any_sent = 1;
+            packets_sent++;
+            inj->swRetryCount = 0;
+            inj->swBackoff    = 0;
+            inj->last_error   = 0;
 
-            inj->next_time_ns += inj->interval_ns;
-            while (inj->next_time_ns <= now_ns) {
-                inj->next_time_ns += inj->interval_ns;
-            }
-            if (inj->next_time_ns < next_wake) next_wake = inj->next_time_ns;
-        } else if (ret == -RTK_ERR_WIFI_TX_BUF_FULL) {
-            inj->retry_count++;
+            uint64_t interval = inj->interval_us ? (uint64_t)inj->interval_us : 1ULL;
+            uint64_t next = inj->next_time_us;
+            if (next <= now_us) next = now_us;
+            next += interval;
+            while (next <= now_us) next += interval;
+            inj->next_time_us = next;
+
+        } else if (ret == INJ_ERR_CHANNEL || ret == -RTK_ERR_WIFI_TX_BUF_FULL) {
             inj->tx_errors++;
-            inj->last_error = ret;
-            uint32_t backoff_us = 1000 * (1 << inj->retry_backoff);
-            if (backoff_us > 1000000) backoff_us = 1000000;
-            inj->next_time_ns = now_ns + backoff_us * 1000;
-            if (inj->retry_backoff < 5) inj->retry_backoff++;
+            inj->last_error = (ret == INJ_ERR_CHANNEL) ? INJ_ERR_CHANNEL : INJ_ERR_BUSY;
+            inj->swRetryCount++;
 
-            if (inj->maxRetries > 0 && inj->retry_count > inj->maxRetries) {
-                inj->active = false;
-#if INJECT_COPY_PACKET_DATA
-                if (inj->packetData) {
-                    vPortFree(inj->packetData);
-                    inj->packetData = NULL;
-                }
-#endif
-                mgr->injectorCount--;
-            } else {
-                if (inj->next_time_ns < next_wake) next_wake = inj->next_time_ns;
+            uint64_t backoff_us = calcBackoffUs(inj->swBackoff);
+            inj->next_time_us = now_us + backoff_us;
+            if (inj->swBackoff < 5) inj->swBackoff++;
+
+            if (inj->swRetries > 0 && inj->swRetryCount > inj->swRetries) {
+                deleteInjector(mgr, inj);
             }
         } else {
             inj->tx_errors++;
             inj->last_error = ret;
-            inj->active = false;
-#if INJECT_COPY_PACKET_DATA
-            if (inj->packetData) {
-                vPortFree(inj->packetData);
-                inj->packetData = NULL;
-            }
-#endif
-            mgr->injectorCount--;
+            deleteInjector(mgr, inj);
         }
+
+        xSemaphoreGive(mgr->lock);
     }
 
-    MGR_UNLOCK(mgr);
+    /* Phase 4: compute next wake time */
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    uint64_t next_wake = UINT64_MAX;
+    for (int i = 0; i < INJECTOR_MAX; i++) {
+        PacketInjector *inj = &mgr->injectors[i];
+        if (!inj->in_use || !inj->active) continue;
+        if (inj->next_time_us < next_wake) next_wake = inj->next_time_us;
+    }
 
     if (next_wake == UINT64_MAX) {
-#ifdef INJECT_USE_RTOS
         if (mgr->scheduler_task != NULL) {
             vTaskSuspend(mgr->scheduler_task);
         }
-#endif
-        return INJ_ERR_NOT_FOUND;
+        xSemaphoreGive(mgr->lock);
+        return 0;
     }
+    xSemaphoreGive(mgr->lock);
 
-    int ret = platform_set_timer_ns(next_wake);
-    if (ret != 0) {
+    if (platform_set_timer_us(next_wake) != 0) {
         return INJ_ERR_TIMER;
     }
 
-    return any_sent ? INJ_OK : INJ_ERR;
+    return packets_sent;
 }
 
-#ifdef INJECT_USE_RTOS
-
-static void scheduler_task(void *param) {
+/*============================================================================
+ *                      RTOS Task and Timer ISR
+ *============================================================================*/
+static void schedulerTask(void *param) {
     injectorManager *mgr = (injectorManager*)param;
     uint64_t now;
-    int res;
-
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        now = platform_get_time_ns();
-        res = injectorManager_schedule(mgr, now);
-        if (res == INJ_ERR_NOT_FOUND) {
-            vTaskSuspend(NULL);
-        }
+        now = platform_get_time_us();
+        injectorManager_schedule(mgr, now);
     }
 }
 
-void injector_timer_isr(void) {
+void injectorManager_timerIsr(void) {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    extern injectorManager g_inj_mgr;
-    if (g_inj_mgr.scheduler_task != NULL) {
-        vTaskNotifyGiveFromISR(g_inj_mgr.scheduler_task, &xHigherPriorityTaskWoken);
+    extern injectorManager *g_inj_mgr;
+    if (g_inj_mgr && g_inj_mgr->timer_callback) {
+        g_inj_mgr->timer_callback(g_inj_mgr);
+    }
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void injectorManager_setTimerCallback(injectorManager *mgr, injector_timer_cb_t callback) {
+    xSemaphoreTake(mgr->lock, portMAX_DELAY);
+    mgr->timer_callback = callback;
+    xSemaphoreGive(mgr->lock);
+}
+
+static void defaultTimerCallback(injectorManager *mgr) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (mgr->scheduler_task != NULL) {
+        vTaskNotifyGiveFromISR(mgr->scheduler_task, &xHigherPriorityTaskWoken);
     }
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 int injectorManager_startSchedulerTask(injectorManager *mgr, UBaseType_t priority) {
-    BaseType_t ret = xTaskCreate(scheduler_task, "inj_sched", 2048, mgr, priority, &mgr->scheduler_task);
+    if (!mgr) return INJ_ERR_INVALID_ARG;
+    BaseType_t ret = xTaskCreate(schedulerTask, "inj_sched", 2048, mgr, priority,
+                                 &mgr->scheduler_task);
     if (ret != pdPASS) return INJ_ERR;
+    injectorManager_setTimerCallback(mgr, defaultTimerCallback);
     return INJ_OK;
 }
-
-#endif
