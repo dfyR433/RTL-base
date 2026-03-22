@@ -4,6 +4,12 @@
 
 ---
 
+## Warning
+
+This project is still being tested.
+
+---
+
 ## Features
 
 ### Monitor Mode (pcapng over UART)
@@ -20,7 +26,7 @@
 ### Packet Injector (Raw Frame Scheduler)
 - Create up to 16 **named injectors** with independent parameters:
   - Channel (auto‑switched unless fixed)
-  - Transmission interval (nanoseconds)
+  - Transmission interval (microseconds)
   - Max packets / retry limit
   - Data rate (1 Mbps … MCS7, matching Ameba rate definitions)
   - TX power (dBm, if supported)
