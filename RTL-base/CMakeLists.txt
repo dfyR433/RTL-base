@@ -9,11 +9,6 @@ ameba_list_append(private_sources
     inject.c
 )
 
-ameba_list_append(private_definitions
-    USE_DWT_CYCCNT
-    INJECT_USE_RTOS
-)
-
 ameba_add_internal_library(ameba_test
     p_SOURCES        ${private_sources}
     p_INCLUDES       ${private_includes}
