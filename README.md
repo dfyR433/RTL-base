@@ -1,6 +1,6 @@
 # RTL-base
 
-**RTL-base** turns your AmebaDplus (RTL8721Dx) board into a professional dual‑band Wi‑Fi monitor and packet injector.
+**RTL-base** turns your AmebaDplus (RTL8721Dx & RTL8711Dx) board into a dual‑band Wi‑Fi monitor and packet injector.
 
 ---
 
@@ -19,21 +19,17 @@ This project is still being tested.
   - Section Header Block (SHB)
   - Interface Description Block (IDB) with linktype 127 (radiotap)
   - Enhanced Packet Blocks (EPB) with **radiotap headers** (channel, RSSI, data rate) + raw frame
-- High‑resolution timestamps using the **DWT cycle counter** (nanoseconds).
 - Lock‑free ring buffer and packet pool – safe for interrupt context, zero packets lost under moderate load.
-- Configurable UART baud rate (default 2 Mbaud) for real‑time streaming.
 
 ### Packet Injector (Raw Frame Scheduler)
 - Create up to 16 **named injectors** with independent parameters:
   - Channel (auto‑switched unless fixed)
-  - Transmission interval (microseconds)
-  - Max packets / retry limit
-  - Data rate (1 Mbps … MCS7, matching Ameba rate definitions)
-  - TX power (dBm, if supported)
+  - Transmission interval (nanoseconds)
+  - Max packets
+  - Data rate
+  - TX power (dBm)
   - Flags: short GI, aggregation, fixed channel, etc.
-- Scheduler runs as an RTOS task or can be driven by a hardware timer.
-- Full control API: start, stop, activate/deactivate, modify parameters **on the fly**.
-- Weak platform hooks for time/timer – easy to adapt to any hardware.
+- Full control API: set, clear, activate/deactivate, modify parameters **on the fly**.
 
 ---
 
