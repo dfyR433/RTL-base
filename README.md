@@ -6,7 +6,7 @@
 
 ## Warning
 
-This project is still being tested.
+This project is still experimental.
 
 ---
 
