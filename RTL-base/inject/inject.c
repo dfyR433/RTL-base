@@ -1,7 +1,6 @@
 /**
  * @file inject.c
- * @brief Wi-Fi Packet Injector Manager – high-precision scheduling
- *        with latency compensation and multi-task safety.
+ * @brief Wi-Fi Packet Injector Manager – high-precision scheduling with latency compensation and multi-task safety.
  */
 
 #include "inject.h"
@@ -141,6 +140,28 @@ uint64_t platform_get_time_ns(void) {
     uint64_t ret     = time_offset_ns;
     TIMER_CRITICAL_EXIT();
     return ret;
+}
+
+/*============================================================================
+ * Validation helpers
+ *============================================================================*/
+static bool is_valid_channel(uint8_t ch) {
+    return (ch == 0) ||
+           (ch >= 1  && ch <= 13)  ||
+           (ch >= 36 && ch <= 165);
+}
+
+static bool is_valid_rate(inject_rate_t rate) {
+    switch (rate) {
+        case INJ_RATE_1M:   case INJ_RATE_2M:   case INJ_RATE_5_5M: case INJ_RATE_11M:
+        case INJ_RATE_6M:   case INJ_RATE_9M:   case INJ_RATE_12M:  case INJ_RATE_18M:
+        case INJ_RATE_24M:  case INJ_RATE_36M:  case INJ_RATE_48M:  case INJ_RATE_54M:
+        case INJ_RATE_MCS0: case INJ_RATE_MCS1: case INJ_RATE_MCS2: case INJ_RATE_MCS3:
+        case INJ_RATE_MCS4: case INJ_RATE_MCS5: case INJ_RATE_MCS6: case INJ_RATE_MCS7:
+            return true;
+        default:
+            return false;
+    }
 }
 
 /*============================================================================
@@ -503,7 +524,7 @@ static void stopSchedulerInternal(injectorManager *mgr) {
     if (!was_running || !task) return;
 
     xSemaphoreGive(mgr->wake_sem);
-    
+
     if (xSemaphoreTake(mgr->stop_done_sem,
                        pdMS_TO_TICKS(INJECTOR_STOP_TIMEOUT_MS)) != pdTRUE) {
         INJ_LOG("WARNING: scheduler did not exit within %d ms – force deleting\n",
@@ -575,7 +596,6 @@ void injectorManager_clearAll(injectorManager *mgr) {
     for (int i = 0; i < INJECTOR_MAX; i++)
         if (mgr->injectors[i].in_use)
             deleteInjector(mgr, &mgr->injectors[i]);
-    mgr->injectorCount = 0;
     xSemaphoreGive(mgr->lock);
 }
 
@@ -602,6 +622,10 @@ int injectorManager_setInjectorEx(injectorManager *mgr,
         return INJ_ERR_INVALID_ARG;
     if (packetLen > INJECTOR_MAX_PACKET_SIZE)
         return INJ_ERR_INVALID_ARG;
+    if (!is_valid_channel(channel))
+        return INJ_ERR_CHANNEL;
+    if (!is_valid_rate(rate))
+        return INJ_ERR_RATE;
 
     if (!timer_initialized) {
         init_timer_once();
@@ -723,9 +747,11 @@ int injectorManager_deactivateInjector(injectorManager *mgr, const char *name) {
     } while (0)
 
 int injectorManager_setRate(injectorManager *mgr, const char *name, inject_rate_t rate) {
+    if (!is_valid_rate(rate)) return INJ_ERR_RATE;
     SET_FIELD(tx_rate, rate, true);
 }
 int injectorManager_setChannel(injectorManager *mgr, const char *name, uint8_t channel) {
+    if (!is_valid_channel(channel)) return INJ_ERR_CHANNEL;
     SET_FIELD(channel, channel, true);
 }
 int injectorManager_setTxPower(injectorManager *mgr, const char *name, int8_t tx_power_dbm) {
@@ -885,6 +911,9 @@ int injectorManager_startSchedulerTaskEx(injectorManager *mgr, UBaseType_t prior
         xSemaphoreGive(mgr->lock);
         return INJ_ERR_STATE;
     }
+    
+    xSemaphoreTake(mgr->stop_done_sem, 0);
+
     mgr->scheduler_running = true;
     BaseType_t ret = xTaskCreate(schedulerTask, "inj_sched", stackSize,
                                  mgr, priority, &mgr->scheduler_task);

@@ -129,14 +129,16 @@ void injectorManager_setPowerMappingCallback(injectorManager *mgr,
  * @param name          Unique name (max INJECTOR_NAME_MAX-1 chars).
  * @param packetData    Frame payload (copied internally).
  * @param packetLen     Payload length (max INJECTOR_MAX_PACKET_SIZE).
- * @param channel       Wi-Fi channel (1-13, 36-165). 0 = use current.
+ * @param channel       Wi-Fi channel: 0 = use current; 1-13 (2.4 GHz);
+ *                      36-165 (5 GHz). Returns INJ_ERR_CHANNEL if invalid.
  * @param start_time_ns Absolute start time (ns). 0 = start immediately.
  * @param interval_ns   Interval between transmissions (ns).
  *                      Pass 0 for single-shot (one packet, then done).
  * @param maxPackets    Packet limit; 0 = unlimited. Ignored if interval_ns==0.
  * @param hwRetries     Hardware retry count passed to the Wi-Fi driver.
  * @param swRetries     Software retry attempts when hardware fails.
- * @param rate          Transmit rate (inject_rate_t).
+ * @param rate          Transmit rate (inject_rate_t). Returns INJ_ERR_RATE if
+ *                      the value is not a member of inject_rate_t.
  * @param tx_power_dbm  TX power in dBm. -1 = use current/default.
  * @param flags         Behaviour flags (inject_flags_t).
  * @param ac_queue      WMM access category.
