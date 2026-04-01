@@ -119,8 +119,8 @@ wireshark -k -i <(cat /dev/ttyUSB0)
 
 Detailed API references, configuration options, and platform requirements are available in the module‑specific documentation:
 
-- [Packet Injector Manager (inject.md)](inject.md)
-- [Monitor Mode Engine (monitor.md)](monitor.md)
+- [Packet Injector Manager (inject.md)](https://github.com/dfyR433/RTL-base/blob/main/docs/inject.md)
+- [Monitor Mode Engine (monitor.md)](https://github.com/dfyR433/RTL-base/blob/main/docs/monitor.md)
 
 ---
 
