@@ -1,6 +1,6 @@
 # RTL-base
 
-A real-time library for high-precision Wi-Fi packet injection and a promiscuous-mode capture engine that streams 802.11 frames over UART as standard capture files. Designed for embedded systems running FreeRTOS (Ameba RTL8721Dx).
+A real-time library for high-precision Wi-Fi packet injection and a promiscuous-mode capture engine that streams 802.11 frames over UART as standard capture files. Designed for embedded systems running Ameba-rtos (Ameba RTL8721Dx).
 
 ---
 
