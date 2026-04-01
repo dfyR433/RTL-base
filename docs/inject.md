@@ -1,50 +1,64 @@
-# Wi‑Fi Packet Injector Manager
+# Wi-Fi Packet Injector Manager
 
 ## Introduction
 
-The **Wi‑Fi Packet Injector Manager** is a real‑time library for high‑precision, scheduled transmission of raw Wi‑Fi frames on embedded systems running FreeRTOS. It allows creating multiple named injectors, each with its own packet payload, transmission rate, channel, power, retry policies, and scheduling parameters. The library uses a nanosecond‑resolution timer and a dedicated scheduler task to achieve accurate packet timing.
+The **Wi-Fi Packet Injector Manager** is a real-time library for high-precision,
+scheduled transmission of raw Wi-Fi frames on embedded systems running FreeRTOS.
+It supports multiple named injectors each with its own payload, rate, channel,
+power, retry policies, and nanosecond-resolution scheduling.
+
+---
 
 ## Features
 
-- **Multiple independent injectors** – up to 16 named injectors (configurable).
-- **High‑precision scheduling** – nanosecond‑accurate transmission times.
-- **Flexible timing** – absolute start time, periodic intervals, or single‑shot.
+- **Multiple independent injectors** – up to 16 named injectors (configurable via `INJECTOR_MAX`).
+- **High-precision scheduling** – nanosecond-accurate transmission times with sub-ms spin guard.
+- **Single-shot and periodic modes** – `interval_ns = 0` for one-shot; any nonzero value for periodic.
 - **Dynamic parameter updates** – modify rate, channel, power, interval, etc., at runtime.
-- **Hardware and software retries** – configurable HW retry limit and SW retry fallback.
-- **Power mapping** – custom callback to map dBm to hardware‑specific TX power percentage.
-- **Channel switching** – per‑injector channel selection (if different from current).
-- **Various transmit rates** – supports 802.11b/g/n rates (1Mbps to MCS7).
+- **Hardware and software retries** – configurable HW retry limit and SW retry fallback with lifetime retry counters.
+- **Latency compensation** – exponential moving average of scheduler and channel-switch latency fed back into deadline calculation.
+- **Power mapping** – custom callback to map dBm to hardware TX power percentage.
+- **Channel switching** – per-injector channel selection.
 - **Access category selection** – BE, BK, VI, VO.
-- **Flags** – disable ACK, short GI, aggregation, fixed channel.
-- **Statistics** – per‑injector and global packet/error counts.
-- **Thread‑safe** – all public functions are protected by a mutex.
-- **Lightweight** – uses only FreeRTOS and platform‑specific Wi‑Fi APIs.
+- **Statistics** – per-injector and global packet/error counts; `injectorManager_resetStats()` to clear.
+- **Thread-safe** – all public functions protected by a mutex; generation counter prevents ABA races.
+- **SMP-safe timer** – spinlock-based critical section when `portMUX_TYPE` is available.
+
+---
 
 ## API Reference
 
 ### Error Codes
 
-| Code                | Value | Description                         |
-|---------------------|-------|-------------------------------------|
-| `INJ_OK`            | 0     | Success                             |
-| `INJ_ERR`           | -1    | General error                       |
-| `INJ_ERR_NOT_FOUND` | -2    | Injector not found                  |
-| `INJ_ERR_INVALID_ARG` | -3 | Invalid argument                    |
-| `INJ_ERR_NO_SPACE`  | -4    | No free slot / memory allocation failed |
-| `INJ_ERR_TIMER`     | -5    | Timer not initialized               |
-| `INJ_ERR_CHANNEL`   | -6    | Channel setting failed              |
-| `INJ_ERR_BUSY`      | -7    | Resource busy (reserved)            |
-| `INJ_ERR_RATE`      | -8    | Invalid rate (reserved)             |
-| `INJ_ERR_POWER`     | -9    | Power setting failed (reserved)     |
-| `INJ_ERR_STATE`     | -10   | Invalid state (e.g., scheduler already running) |
+| Code | Value | Description |
+|------|-------|-------------|
+| `INJ_OK` | 0 | Success |
+| `INJ_ERR` | -1 | General error |
+| `INJ_ERR_NOT_FOUND` | -2 | Injector not found |
+| `INJ_ERR_INVALID_ARG` | -3 | Invalid argument |
+| `INJ_ERR_NO_SPACE` | -4 | No free slot / allocation failed |
+| `INJ_ERR_TIMER` | -5 | Timer not initialised |
+| `INJ_ERR_CHANNEL` | -6 | Invalid channel value / channel set failed |
+| `INJ_ERR_BUSY` | -7 | Resource busy (reserved) |
+| `INJ_ERR_RATE` | -8 | Invalid rate value |
+| `INJ_ERR_POWER` | -9 | Power setting failed (reserved) |
+| `INJ_ERR_STATE` | -10 | Invalid state (e.g., scheduler already running) |
+
+---
 
 ### Configuration Macros
 
-| Macro                      | Default | Description                         |
-|----------------------------|---------|-------------------------------------|
-| `INJECTOR_NAME_MAX`        | 32      | Maximum length of injector name     |
-| `INJECTOR_MAX`             | 16      | Maximum number of injectors         |
-| `INJECTOR_MAX_PACKET_SIZE` | 2048    | Maximum packet size (bytes)         |
+| Macro | Default | Description |
+|-------|---------|-------------|
+| `INJECTOR_NAME_MAX` | 32 | Maximum injector name length (bytes) |
+| `INJECTOR_MAX` | 16 | Maximum number of injectors |
+| `INJECTOR_MAX_PACKET_SIZE` | 2048 | Maximum packet size (bytes) |
+| `INJECTOR_STOP_TIMEOUT_MS` | 200 | ms to wait for clean scheduler exit before force-delete |
+| `INJECTOR_SPIN_GUARD_NS` | 2 000 000 | ns guard window before deadline where scheduler yields instead of sleeping. Set to 0 to disable. |
+
+Override `INJECTOR_STOP_TIMEOUT_MS` and `INJECTOR_SPIN_GUARD_NS` by defining them before including `inject.h`.
+
+---
 
 ### Types
 
@@ -52,39 +66,29 @@ The **Wi‑Fi Packet Injector Manager** is a real‑time library for high‑prec
 
 ```c
 typedef enum {
-    INJ_RATE_1M   = 0x02,
-    INJ_RATE_2M   = 0x04,
-    INJ_RATE_5_5M = 0x0B,
-    INJ_RATE_11M  = 0x16,
-    INJ_RATE_6M   = 0x0C,
-    INJ_RATE_9M   = 0x12,
-    INJ_RATE_12M  = 0x18,
-    INJ_RATE_18M  = 0x24,
-    INJ_RATE_24M  = 0x30,
-    INJ_RATE_36M  = 0x48,
-    INJ_RATE_48M  = 0x60,
-    INJ_RATE_54M  = 0x6C,
-    INJ_RATE_MCS0 = 0x80,
-    INJ_RATE_MCS1 = 0x81,
-    INJ_RATE_MCS2 = 0x82,
-    INJ_RATE_MCS3 = 0x83,
-    INJ_RATE_MCS4 = 0x84,
-    INJ_RATE_MCS5 = 0x85,
-    INJ_RATE_MCS6 = 0x86,
-    INJ_RATE_MCS7 = 0x87,
+    INJ_RATE_1M  = 0x02,  INJ_RATE_2M   = 0x04,
+    INJ_RATE_5_5M= 0x0B,  INJ_RATE_11M  = 0x16,
+    INJ_RATE_6M  = 0x0C,  INJ_RATE_9M   = 0x12,
+    INJ_RATE_12M = 0x18,  INJ_RATE_18M  = 0x24,
+    INJ_RATE_24M = 0x30,  INJ_RATE_36M  = 0x48,
+    INJ_RATE_48M = 0x60,  INJ_RATE_54M  = 0x6C,
+    INJ_RATE_MCS0= 0x80,  INJ_RATE_MCS1 = 0x81,
+    INJ_RATE_MCS2= 0x82,  INJ_RATE_MCS3 = 0x83,
+    INJ_RATE_MCS4= 0x84,  INJ_RATE_MCS5 = 0x85,
+    INJ_RATE_MCS6= 0x86,  INJ_RATE_MCS7 = 0x87,
     INJ_RATE_DEFAULT = INJ_RATE_1M
 } inject_rate_t;
 ```
 
 #### `inject_flags_t`
 
-| Flag                   | Value  | Description                         |
-|------------------------|--------|-------------------------------------|
-| `INJ_FLAG_NONE`        | 0      | No flags                            |
-| `INJ_FLAG_NO_ACK`      | 1<<0   | Disable acknowledgment              |
-| `INJ_FLAG_USE_SHORT_GI`| 1<<1   | Use short guard interval            |
-| `INJ_FLAG_AGGREGATE`   | 1<<2   | Enable aggregation (if supported)   |
-| `INJ_FLAG_FIXED_CHANNEL`| 1<<3  | (Reserved)                          |
+| Flag | Value | Description |
+|------|-------|-------------|
+| `INJ_FLAG_NONE` | 0 | No flags |
+| `INJ_FLAG_NO_ACK` | 1<<0 | Disable acknowledgment |
+| `INJ_FLAG_USE_SHORT_GI` | 1<<1 | Use short guard interval |
+| `INJ_FLAG_AGGREGATE` | 1<<2 | Enable aggregation (if supported) |
+| `INJ_FLAG_FIXED_CHANNEL` | 1<<3 | Reserved |
 
 #### `inject_ac_t`
 
@@ -99,68 +103,61 @@ typedef enum {
 
 #### `InjectorInfo`
 
-Structure to retrieve injector status.
-
 ```c
 typedef struct {
-    char name[INJECTOR_NAME_MAX];
-    bool active;
-    uint8_t channel;
-    uint64_t interval_ns;
-    uint32_t maxPackets;
-    uint32_t packets_sent;
-    uint32_t tx_errors;
-    uint32_t tx_retries;      // software retry attempts
-    uint8_t  maxRetries;      // hardware retry limit
-    inject_rate_t tx_rate;
-    int8_t   tx_power_dbm;
+    char           name[INJECTOR_NAME_MAX];
+    bool           active;
+    uint8_t        channel;
+    uint64_t       interval_ns;   // 0 = single-shot
+    uint32_t       maxPackets;
+    uint32_t       packets_sent;
+    uint32_t       tx_errors;
+    uint32_t       tx_retries;    // Lifetime SW retry total
+    uint8_t        maxRetries;    // HW retry limit
+    inject_rate_t  tx_rate;
+    int8_t         tx_power_dbm;
     inject_flags_t flags;
-    inject_ac_t ac_queue;
-    uint32_t packetLen;
+    inject_ac_t    ac_queue;
+    uint32_t       packetLen;
 } InjectorInfo;
 ```
+
+> **`tx_retries`** is the **lifetime total** of software retry attempts
+> accumulated since the injector was created or last reset via
+> `injectorManager_resetStats()`.
 
 ---
 
 ### Manager Lifecycle
 
+#### `void injector_set_timer_freq_hz(uint32_t freq)`
+
+Sets the frequency of the high-resolution hardware timer (Hz).
+
+> ⚠️ **Must be called BEFORE `injectorManager_create()`.**
+> Calling `create()` first will always return NULL.
+
 #### `injectorManager* injectorManager_create(void)`
 
-Creates a new injector manager instance. Allocates memory, initialises mutexes, and prepares the internal timer.
-
-- **Returns:** Pointer to manager, or `NULL` on failure.
+Creates a new manager instance.  Returns `NULL` if the timer frequency has not
+been set, if memory allocation fails, or if semaphore creation fails.
 
 #### `void injectorManager_destroy(injectorManager *mgr)`
 
-Destroys a manager instance. Stops the scheduler task (if running), frees all injector resources, and releases memory.
+Stops the scheduler task (with timeout + force-delete), frees all injectors and
+releases the manager.
 
-- **Parameters:** `mgr` – manager instance.
+> **Warning:** Do not call from the scheduler task.
+> After this call, the pointer passed by the caller is dangling — set it to
+> `NULL` immediately.
 
 #### `void injectorManager_clearAll(injectorManager *mgr)`
 
-Removes all injectors from the manager. Does not affect the scheduler state.
-
-- **Parameters:** `mgr` – manager instance.
+Removes all injectors.  Scheduler state is unaffected.
 
 #### `void injectorManager_setWlanIndex(injectorManager *mgr, uint8_t wlan_idx)`
 
-Sets the Wi‑Fi interface index used for all transmissions. The default is `STA_WLAN_INDEX` (usually 0).
-
-- **Parameters:**
-  - `mgr` – manager instance.
-  - `wlan_idx` – interface index (e.g., 0 for station).
-
-#### `void injector_set_timer_freq_hz(uint32_t freq)`
-
-**Must be called before any injector creation** to set the frequency of the high‑resolution timer (in Hz). This value is used to convert timer counts to nanoseconds.
-
-- **Parameters:** `freq` – timer frequency in Hz.
-
-#### `void injectorManager_setLogCallback(inj_log_cb_t cb)`
-
-Sets a callback for logging messages. If no callback is set, `printf` is used.
-
-- **Parameters:** `cb` – function pointer with signature `void (*cb)(const char *msg)`.
+Sets the Wi-Fi interface index (default: `STA_WLAN_INDEX`).
 
 ---
 
@@ -168,220 +165,148 @@ Sets a callback for logging messages. If no callback is set, `printf` is used.
 
 #### `int injectorManager_setInjectorEx(...)`
 
-Creates or updates an injector (inactive by default) with full parameter control. The packet data is copied internally, so the caller may free its buffer after the call.
+Creates or reconfigures a named injector (inactive by default).
+
+**If an injector with the same name already exists**, it is reconfigured in
+place and **all statistics and timing-compensation accumulators are reset**.
+Activate it separately with `injectorManager_activateInjector()`.
 
 ```c
-int injectorManager_setInjectorEx(injectorManager *mgr,
-                                  const char *name,
-                                  const uint8_t *packetData,
-                                  uint32_t packetLen,
-                                  uint8_t channel,
-                                  uint64_t start_time_ns,
-                                  uint64_t interval_ns,
-                                  uint32_t maxPackets,
-                                  uint8_t hwRetries,
-                                  uint8_t swRetries,
-                                  inject_rate_t rate,
-                                  int8_t tx_power_dbm,
-                                  inject_flags_t flags,
-                                  inject_ac_t ac_queue);
+int injectorManager_setInjectorEx(
+    injectorManager *mgr,
+    const char      *name,           // unique name
+    const uint8_t   *packetData,     // payload (copied internally)
+    uint32_t         packetLen,      // ≤ INJECTOR_MAX_PACKET_SIZE
+    uint8_t          channel,        // 0 = use current; 1-13; 36-165
+    uint64_t         start_time_ns,  // absolute start time; 0 = now
+    uint64_t         interval_ns,    // period (ns); 0 = single-shot
+    uint32_t         maxPackets,     // 0 = unlimited; ignored if interval_ns==0
+    uint8_t          hwRetries,      // hardware retry count
+    uint8_t          swRetries,      // software retry attempts on HW failure
+    inject_rate_t    rate,           // must be a member of inject_rate_t
+    int8_t           tx_power_dbm,   // -1 = use current/default
+    inject_flags_t   flags,
+    inject_ac_t      ac_queue
+);
 ```
 
-- **Parameters:**
-  - `mgr` – manager instance.
-  - `name` – unique name for the injector (max `INJECTOR_NAME_MAX-1` chars).
-  - `packetData` – raw frame data (must include 802.11 header and FCS if not added by hardware).
-  - `packetLen` – length of packet (max `INJECTOR_MAX_PACKET_SIZE`).
-  - `channel` – Wi‑Fi channel (1-13, 36-165). 0 means "use current".
-  - `start_time_ns` – absolute nanosecond timestamp when the injector should start. If `0`, start immediately.
-  - `interval_ns` – interval between successive transmissions (nanoseconds). 0 means single‑shot (only one packet).
-  - `maxPackets` – maximum number of packets to send; 0 = unlimited.
-  - `hwRetries` – hardware retry count (passed to the Wi‑Fi driver).
-  - `swRetries` – software retry attempts if hardware fails.
-  - `rate` – transmit rate (see `inject_rate_t`).
-  - `tx_power_dbm` – transmit power in dBm; -1 = use default.
-  - `flags` – bitwise OR of `inject_flags_t`.
-  - `ac_queue` – access category.
-- **Returns:** `INJ_OK` on success, error code otherwise.
+Returns `INJ_ERR_CHANNEL` for an invalid channel, `INJ_ERR_RATE` for an
+unrecognised rate value.
 
-#### `static inline int injectorManager_setInjector(...)`
+**`interval_ns = 0`** – single-shot: the injector transmits exactly one packet
+then transitions to `DONE`.  `maxPackets` is ignored in this mode.
 
-Simplified version with default values: `start_time_ns=0`, `swRetries=5`, `rate=INJ_RATE_DEFAULT`, `tx_power_dbm=-1`, `flags=INJ_FLAG_NONE`, `ac_queue=INJ_AC_BE`.
+#### `int injectorManager_setInjector(...)` (inline convenience)
 
-```c
-int injectorManager_setInjector(injectorManager *mgr,
-                                const char *name,
-                                const uint8_t *packetData,
-                                uint32_t packetLen,
-                                uint8_t channel,
-                                uint64_t interval_ns,
-                                uint32_t maxPackets,
-                                uint8_t hwRetries);
-```
+Wrapper with defaults: `start_time_ns=0`, `swRetries=5`, `rate=1M`,
+`tx_power_dbm=-1`, `flags=NONE`, `ac_queue=BE`.
 
-#### `int injectorManager_deleteInjector(injectorManager *mgr, const char *name)`
-
-Deletes an injector. If the injector is active, it is deactivated first.
-
-- **Returns:** `INJ_OK` or `INJ_ERR_NOT_FOUND`.
-
-#### `int injectorManager_activateInjector(injectorManager *mgr, const char *name)`
-
-Activates an existing injector. The scheduler will begin transmitting according to its parameters.
-
-- **Returns:** `INJ_OK` or `INJ_ERR_NOT_FOUND`.
-
-#### `int injectorManager_deactivateInjector(injectorManager *mgr, const char *name)`
-
-Deactivates an injector. No further packets will be sent, but the injector remains configured.
-
-- **Returns:** `INJ_OK` or `INJ_ERR_NOT_FOUND`.
+#### `int injectorManager_deleteInjector(mgr, name)`
+#### `int injectorManager_activateInjector(mgr, name)`
+#### `int injectorManager_deactivateInjector(mgr, name)`
 
 ---
 
 ### Dynamic Parameter Updates
 
-All these functions modify a single parameter of an existing injector. The change takes effect immediately (next transmission uses the new value).
+All setters are thread-safe and generation-stamped to prevent ABA races when
+called concurrently with the scheduler.
 
-- `int injectorManager_setRate(...)`
-- `int injectorManager_setChannel(...)`
-- `int injectorManager_setTxPower(...)`
-- `int injectorManager_setIntervalNs(...)`
-- `int injectorManager_setMaxPackets(...)`
-- `int injectorManager_setHwRetries(...)`
-- `int injectorManager_setSwRetries(...)`
-- `int injectorManager_setFlags(...)`
-- `int injectorManager_setAcQueue(...)`
-
-**Signature example:**
-```c
-int injectorManager_setRate(injectorManager *mgr, const char *name, inject_rate_t rate);
 ```
-All return `INJ_OK` or `INJ_ERR_NOT_FOUND`.
-
-#### `int injectorManager_setPacketData(injectorManager *mgr, const char *name, const uint8_t *newData, uint32_t newLen)`
-
-Replaces the packet payload of an injector. The new data is copied internally.
-
-- **Returns:** `INJ_OK`, `INJ_ERR_NOT_FOUND`, or `INJ_ERR_NO_SPACE` (memory allocation failure).
+injectorManager_setRate(mgr, name, rate)         // INJ_ERR_RATE if unknown rate
+injectorManager_setChannel(mgr, name, channel)   // INJ_ERR_CHANNEL if invalid channel
+injectorManager_setTxPower(mgr, name, tx_power_dbm)
+injectorManager_setIntervalNs(mgr, name, interval_ns)   // 0 = single-shot
+injectorManager_setMaxPackets(mgr, name, maxPackets)
+injectorManager_setHwRetries(mgr, name, hwRetries)
+injectorManager_setSwRetries(mgr, name, swRetries)
+injectorManager_setFlags(mgr, name, flags)
+injectorManager_setAcQueue(mgr, name, ac_queue)
+injectorManager_setPacketData(mgr, name, data, len)
+```
 
 ---
 
-### Information and Statistics
+### Statistics
 
-#### `int injectorManager_getInfo(injectorManager *mgr, const char *name, InjectorInfo *info)`
+#### `int injectorManager_getInfo(mgr, name, &info)`
 
-Fills an `InjectorInfo` structure with the current state of an injector.
+Fills an `InjectorInfo` struct.  `info.tx_retries` is the lifetime SW-retry
+total.
 
-- **Returns:** `INJ_OK` or `INJ_ERR_NOT_FOUND`.
+#### `int injectorManager_listInjectors(mgr, names, maxCount)`
 
-#### `int injectorManager_listInjectors(injectorManager *mgr, char names[][INJECTOR_NAME_MAX], int maxCount)`
+Returns the number of names written.
 
-Fills an array of strings with the names of all defined injectors. Returns the number of names copied.
+#### `uint64_t injectorManager_getTotalPackets(mgr)`
+#### `uint32_t injectorManager_getActiveCount(mgr)`
+#### `uint32_t injectorManager_getTotalErrors(mgr)`
 
-- **Parameters:**
-  - `names` – array of strings (each of length `INJECTOR_NAME_MAX`).
-  - `maxCount` – size of the `names` array.
-- **Returns:** number of names written (could be less than `maxCount`).
+#### `int injectorManager_resetStats(mgr, name)`
 
-#### `uint64_t injectorManager_getTotalPackets(injectorManager *mgr)`
-
-Returns the total number of packets successfully transmitted by all injectors.
-
-#### `uint32_t injectorManager_getActiveCount(injectorManager *mgr)`
-
-Returns the number of currently active injectors.
-
-#### `uint32_t injectorManager_getTotalErrors(injectorManager *mgr)`
-
-Returns the total number of transmission errors (after exhausting software retries) across all injectors.
+Clears `packets_sent`, `tx_errors`, and `tx_retries` for the named injector.
+Does not affect scheduling state or timing-compensation EMAs.
 
 ---
 
 ### Scheduler Control
 
-#### `int injectorManager_startSchedulerTask(injectorManager *mgr, UBaseType_t priority)`
+#### `int injectorManager_startSchedulerTask(mgr, priority)`
 
-Creates the scheduler task with a default stack size (2048 bytes). The task runs a tight loop checking which injectors are due for transmission.
+Creates the scheduler task with a default stack of 2048 bytes.
 
-- **Parameters:**
-  - `mgr` – manager instance.
-  - `priority` – FreeRTOS task priority.
-- **Returns:** `INJ_OK` or `INJ_ERR` (if task creation fails) or `INJ_ERR_STATE` (if already running).
+#### `int injectorManager_startSchedulerTaskEx(mgr, priority, stackSize)`
 
-#### `int injectorManager_startSchedulerTaskEx(injectorManager *mgr, UBaseType_t priority, uint32_t stackSize)`
+Same, with an explicit stack size.  Recommended minimum is 2048 bytes; increase
+if your `wifi_send_raw_frame()` implementation uses significant stack.
 
-Same as above, but allows specifying the task stack size.
+#### `int injectorManager_stopSchedulerTask(mgr)`
 
-#### `int injectorManager_stopSchedulerTask(injectorManager *mgr)`
+Signals the scheduler to stop, waits up to `INJECTOR_STOP_TIMEOUT_MS` ms for a
+clean exit, then force-deletes the task if it has not exited.
 
-Stops the scheduler task. Waits up to 100 ms for the task to exit. If the task does not terminate gracefully, it is forcibly deleted.
+- Returns `INJ_ERR_STATE` if no scheduler is running.
+- Returns `INJ_ERR_STATE` (and fires `configASSERT`) if called from the
+  scheduler task itself.
 
-- **Returns:** `INJ_OK` or `INJ_ERR_STATE` (if no task running).
+> **Force-delete warning:** if the scheduler is blocked inside
+> `wifi_send_raw_frame()` when the timeout fires, the task is deleted in a
+> potentially unsafe state.  Increase `INJECTOR_STOP_TIMEOUT_MS` to a value
+> larger than the worst-case `wifi_send_raw_frame()` latency on your platform.
 
 ---
 
 ### Power Mapping
 
-#### `void injectorManager_setPowerMappingCallback(injectorManager *mgr, uint8_t (*callback)(int8_t dbm))`
+#### `void injectorManager_setPowerMappingCallback(mgr, callback)`
 
-Sets a callback to convert a requested dBm value to a hardware‑specific percentage (0‑100). The callback is invoked every time the TX power is changed. The default mapping is:
+Registers a `uint8_t (*callback)(int8_t dbm)` to convert a dBm value to a
+hardware percentage.  Default mapping:
 
-| dBm   | Percentage |
-|-------|-----------|
-| ≤0    | 13        |
-| ≤5    | 25        |
-| ≤10   | 50        |
-| ≤15   | 75        |
-| >15   | 100       |
-
-- **Parameters:**
-  - `mgr` – manager instance.
-  - `callback` – function that takes dBm and returns percentage (0‑100).
+| dBm | % |
+|-----|---|
+| ≤ 0 | 13 |
+| ≤ 5 | 25 |
+| ≤ 10 | 50 |
+| ≤ 15 | 75 |
+| > 15 | 100 |
 
 ---
 
 ## Platform Requirements
 
-The library expects the following platform‑specific functions to be implemented by the application (or linked from the hardware abstraction layer):
+The following symbols must be provided by the application or BSP:
 
-### `uint64_t platform_get_time_ns(void)`
+| Symbol | Signature | Description |
+|--------|-----------|-------------|
+| `init_highres_timer` | `void (void)` | Initialise the hardware timer |
+| `read_highres_timer` | `uint32_t (void)` | Read raw 32-bit timer counter |
+| `wifi_set_channel` | `int (uint8_t wlan_idx, uint8_t ch)` | Change Wi-Fi channel |
+| `wifi_send_raw_frame` | `int (struct rtw_raw_frame_desc*)` | Transmit raw 802.11 frame |
+| `wifi_set_tx_power_percentage` | `int (uint8_t wlan_idx, uint8_t pct)` | Set TX power (weak default = no-op) |
 
-Returns the current time in nanoseconds since an arbitrary epoch. Must be monotonic and high‑resolution.
-
-### `void injector_scheduler_wait_until_ns(uint64_t target_ns)`
-
-Blocks the calling task (the scheduler) until the system time reaches `target_ns`. This is used to achieve accurate timing. The implementation typically uses a hardware timer or a busy‑wait with `taskYIELD()`.
-
-### `void init_highres_timer(void)`
-
-Initialises the high‑resolution timer used for time measurement. Called automatically by `platform_get_time_ns()` on first use.
-
-### `uint32_t read_highres_timer(void)`
-
-Returns the current count of the high‑resolution timer.
-
-### `int wifi_set_tx_power_percentage(uint8_t wlan_idx, uint8_t percentage)`
-
-Sets the TX power of the Wi‑Fi interface to the given percentage of maximum. This function is weakly defined to allow application‑specific implementation. The default (weak) version returns 0 (success). **The application must provide a real implementation.**
-
-### `int wifi_set_channel(uint8_t wlan_idx, uint8_t channel)`
-
-Sets the Wi‑Fi channel of the interface. Must be provided by the application.
-
-### `int wifi_send_raw_frame(struct rtw_raw_frame_desc *desc)`
-
-Sends a raw 802.11 frame using the provided descriptor. The descriptor structure is defined by the Wi‑Fi driver (here `rtw_raw_frame_desc`). The library fills the following fields:
-
-- `wlan_idx`
-- `buf` / `buf_len`
-- `tx_rate`
-- `retry_limit`
-- `ac_queue`
-- `sgi`
-- `agg_en`
-
-**Note:** The application is responsible for including the FCS (Frame Check Sequence) in the packet data if required by the hardware.
+`platform_get_time_ns()` is implemented internally using `init_highres_timer` /
+`read_highres_timer` and the frequency set by `injector_set_timer_freq_hz()`.
 
 ---
 
@@ -390,71 +315,82 @@ Sends a raw 802.11 frame using the provided descriptor. The descriptor structure
 ```c
 #include "inject.h"
 
-// Global manager pointer
 static injectorManager *g_mgr = NULL;
 
-// Callback for TX power mapping (example: linear mapping)
+// Custom TX power map (linear 0–20 dBm → 0–100%)
 uint8_t my_power_map(int8_t dbm) {
-    if (dbm <= 0) return 10;
+    if (dbm <= 0)  return 10;
     if (dbm >= 20) return 100;
     return (uint8_t)((dbm * 100) / 20);
 }
 
-// Timer frequency (e.g., 80 MHz)
-#define TIMER_FREQ_HZ 80000000
+#define TIMER_FREQ_HZ  80000000UL   // 80 MHz hardware timer
 
-void main(void) {
-    // 1. Create manager
-    g_mgr = injectorManager_create();
-    if (!g_mgr) {
-        // handle error
-    }
-
-    // 2. Set timer frequency (must be done before any injector)
+void app_main(void) {
+    // ── Step 1: set timer frequency FIRST ─────────────────────────────
     injector_set_timer_freq_hz(TIMER_FREQ_HZ);
 
-    // 3. Set WLAN interface index (usually 0)
-    injectorManager_setWlanIndex(g_mgr, 0);
+    // ── Step 2: create manager ─────────────────────────────────────────
+    g_mgr = injectorManager_create();
+    if (!g_mgr) { /* handle error */ return; }
 
-    // 4. Set power mapping callback (optional)
+    // ── Step 3: configure interface and callbacks ──────────────────────
+    injectorManager_setWlanIndex(g_mgr, 0);
     injectorManager_setPowerMappingCallback(g_mgr, my_power_map);
 
-    // 5. Set logging callback (optional)
-    injectorManager_setLogCallback(my_log_callback);
+    // ── Step 4: define a periodic beacon injector ──────────────────────
+    uint8_t beacon[] = { /* 802.11 frame bytes */ };
 
-    // 6. Define packet payload (e.g., a beacon frame)
-    uint8_t beacon[] = { ... }; // 802.11 frame with header and FCS
+    int ret = injectorManager_setInjector(
+        g_mgr,
+        "beacon",          // name
+        beacon,            // payload
+        sizeof(beacon),    // length
+        6,                 // channel 6
+        102400000ULL,      // 102.4 ms interval (~9.8 Hz)
+        0,                 // unlimited packets
+        3                  // 3 HW retries
+    );
+    if (ret != INJ_OK) { /* handle error */ }
 
-    // 7. Create an injector (will be inactive)
-    int ret = injectorManager_setInjector(g_mgr,
-                                          "beacon_inj",
-                                          beacon,
-                                          sizeof(beacon),
-                                          6,               // channel 6
-                                          1000000000ULL,   // interval = 1 second
-                                          0,               // unlimited packets
-                                          3);              // 3 hardware retries
-    if (ret != INJ_OK) {
-        // handle error
+    // ── Step 5: define a single-shot probe request ─────────────────────
+    uint8_t probe[] = { /* 802.11 probe request */ };
+
+    ret = injectorManager_setInjectorEx(
+        g_mgr, "probe_once",
+        probe, sizeof(probe),
+        1,                 // channel 1
+        0,                 // start now
+        0,                 // interval_ns = 0  → single-shot
+        0,                 // maxPackets ignored for single-shot
+        2,                 // hwRetries
+        3,                 // swRetries
+        INJ_RATE_6M,
+        10,                // 10 dBm
+        INJ_FLAG_NO_ACK,
+        INJ_AC_BE
+    );
+    if (ret != INJ_OK) { /* handle error */ }
+
+    // ── Step 6: start scheduler task (priority 5, default stack) ──────
+    ret = injectorManager_startSchedulerTask(g_mgr, 5);
+    if (ret != INJ_OK) { /* handle error */ }
+
+    // ── Step 7: activate injectors ────────────────────────────────────
+    injectorManager_activateInjector(g_mgr, "beacon");
+    injectorManager_activateInjector(g_mgr, "probe_once");
+
+    // ── Later: read statistics ─────────────────────────────────────────
+    InjectorInfo info;
+    if (injectorManager_getInfo(g_mgr, "beacon", &info) == INJ_OK) {
+        printf("beacon: sent=%u errors=%u retries=%u\n",
+               info.packets_sent, info.tx_errors, info.tx_retries);
     }
 
-    // 8. Start the scheduler task
-    ret = injectorManager_startSchedulerTask(g_mgr, 5); // priority 5
-    if (ret != INJ_OK) {
-        // handle error
-    }
-
-    // 9. Activate the injector
-    ret = injectorManager_activateInjector(g_mgr, "beacon_inj");
-    if (ret != INJ_OK) {
-        // handle error
-    }
-
-    // ... application continues ...
-
-    // Later: stop and clean up
+    // ── Shutdown ───────────────────────────────────────────────────────
     injectorManager_stopSchedulerTask(g_mgr);
     injectorManager_destroy(g_mgr);
+    g_mgr = NULL;   // clear dangling pointer
 }
 ```
 
@@ -462,16 +398,54 @@ void main(void) {
 
 ## Notes and Limitations
 
-- **Timer initialisation:** `injector_set_timer_freq_hz()` **must** be called before creating any injector. The timer frequency must match the hardware timer used by `read_highres_timer()`.
-- **Packet data:** The library copies the packet data internally, so the caller may free its buffer after `setInjector`. The data must include the full 802.11 MAC header and FCS unless the hardware adds it automatically.
-- **Channel switching:** The scheduler changes the channel only if an injector specifies a non‑zero channel different from the current channel. If multiple injectors use different channels, the channel will change on every transmission, which may cause delays. It is advisable to group injectors by channel or use `INJ_FLAG_FIXED_CHANNEL` (reserved) to prevent changes.
-- **Power setting:** The `wifi_set_tx_power_percentage()` function is weakly defined and must be provided by the application if TX power control is needed.
-- **Real‑time behaviour:** The scheduler task uses a busy‑wait (or `injector_scheduler_wait_until_ns`) to achieve nanosecond accuracy. This may consume CPU time; adjust task priority and stack size accordingly.
-- **Concurrency:** All public functions are thread‑safe, but the scheduler task should not be modified directly.
-- **Memory:** Each injector allocates its own packet buffer. The maximum number of injectors is limited by `INJECTOR_MAX`.
+### Timing accuracy
+
+The scheduler uses a two-phase sleep strategy:
+1. **Tick sleep** for `(deadline − INJECTOR_SPIN_GUARD_NS)` using
+   `xSemaphoreTake()` with a tick timeout.  An early wake via `activateInjector`
+   or `stopSchedulerTask` causes immediate re-evaluation.
+2. **Yield spin** for the remaining `INJECTOR_SPIN_GUARD_NS` window, calling
+   `taskYIELD()` each iteration.
+
+At `INJECTOR_SPIN_GUARD_NS = 2 ms` and a 100 Hz tick rate this gives ~2 ms
+accuracy at the cost of one `taskYIELD()` per 2 ms per active injector.  Set
+the guard to 0 for pure tick-based sleeping.
+
+### Latency compensation
+
+After each successful transmission the scheduler adjusts the next deadline by
+subtracting an exponential moving average of the scheduler latency and the
+channel-switch+TX time.  Compensation is capped at half the interval to
+prevent runaway drift.
+
+### Channel switching
+
+Switching channels on every packet adds measurable latency (typically 1–5 ms).
+Group injectors by channel or assign the same channel to all injectors to avoid
+inter-packet channel thrashing.
+
+### Memory
+
+Each injector allocates a heap buffer for its packet payload.  Under heavy load
+the per-send `pvPortMalloc` / `vPortFree` pair is performed **outside** the
+manager mutex to avoid blocking API callers.
+
+### SMP (multi-core)
+
+`platform_get_time_ns()` uses a `portMUX_TYPE` spinlock when `portMUX_TYPE` is
+defined (FreeRTOS-SMP, ESP-IDF).  Single-core builds fall back to
+`taskENTER_CRITICAL()`.
+
+### Stopping safely
+
+`injectorManager_stopSchedulerTask()` and `injectorManager_destroy()` both wait
+up to `INJECTOR_STOP_TIMEOUT_MS` ms for a clean exit.  If the task is blocked
+inside `wifi_send_raw_frame()` past this deadline it is force-deleted, which
+may leave the Wi-Fi driver in an undefined state.  Choose
+`INJECTOR_STOP_TIMEOUT_MS` conservatively for your hardware.
 
 ---
 
 ## License
 
-This project is licensed under the GPLv2
+This project is licensed under the GPLv2.
