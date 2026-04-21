@@ -24,6 +24,10 @@ Built to bridge the gap between low-level hardware registers and high-level netw
 
 ## System Architecture
 
+<p align="center">
+  <img src="architecture.svg" alt="System Architecture" width="800"/>
+</p>
+
 The toolkit is divided into three independent but highly synergistic modules:
 
 1. **High-Precision Timer (`timer.c`)**: Bypasses standard OS ticks to utilize the Cortex-M DWT cycle counter, providing ~3ns resolution timing crucial for RF scheduling.
@@ -58,7 +62,12 @@ The toolkit is divided into three independent but highly synergistic modules:
 ## Getting Started
 
 ### Prerequisites
-* **Hardware**: Realtek Ameba RTL8721Dx or RTL8711Dx Development Board.
+
+<p align="center">
+  <img src="img/Ai-Thinker_BW20-12F_Dev_Kit.png" alt="BW20-12F_Dev_Kit" width="500"/>
+</p>
+
+* **Hardware**: Realtek Amebadplus RTL8721Dx or RTL8711Dx Development Board.
 * **SDK**: [Ameba RTOS SDK](https://github.com/Ameba-AIoT/ameba-rtos) (Standard FreeRTOS environment).
 * **Host Tooling**: A Linux environment with `wireshark` and standard serial utilities.
 
