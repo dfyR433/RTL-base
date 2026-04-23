@@ -25,7 +25,7 @@ Built to bridge the gap between low-level hardware registers and high-level netw
 ## System Architecture
 
 <p align="center">
-  <img src="architecture.svg" alt="System Architecture" width="800"/>
+  <img src="img/architecture.svg" alt="System Architecture" width="800"/>
 </p>
 
 The toolkit is divided into three independent but highly synergistic modules:
